@@ -1,10 +1,11 @@
 # 放到你仓库的 .github/workflows/build-airhand.yml
 #
-# 触发：仓库页面 Actions → 左侧 build-airhand → Run workflow
-# 产物：Actions 运行页底部的 Artifacts（airhand-windows / airhand-macos）
+# 前提：仓库 Settings → Secrets and variables → Actions → Repository secrets 里有两个：
+#   AIRHAND_SERVER      形如 192.168.110.176:4433 或 www.example.com:4433（不要带 http://，不要加引号）
+#   AIRHAND_SERVER_FP   64 位十六进制指纹（服务器日志里打印的那串，冒号可留可去）
 #
-# 注意：windows-latest 自带 VS2022 的 C++ 工具链和 CMake，但没有 NASM，
-# openh264 的汇编需要它，所以下面用 choco 装一次。
+# 触发：Actions → 左侧 build-airhand → Run workflow
+# 产物：运行页底部的 Artifacts（airhand-windows / airhand-macos）
 
 name: build-airhand
 
@@ -15,10 +16,8 @@ on:
       - "v*"
 
 env:
-  # 烧进安装包的默认值。不想公开的话改成 secrets.AIRHAND_SERVER / secrets.AIRHAND_SERVER_FP，
-  # 然后在 Settings → Secrets and variables → Actions 里建这两个 secret。
-  AIRHAND_SERVER: 192.168.110.176:4433
-  AIRHAND_SERVER_FP: fad651cf07ef9a08f7ef3ebf69b90b5e2722e632dd5af79a470a8d04e675a17c
+  AIRHAND_SERVER: ${{ secrets.AIRHAND_SERVER }}
+  AIRHAND_SERVER_FP: ${{ secrets.AIRHAND_SERVER_FP }}
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -26,6 +25,26 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      # secret 缺失时这里直接失败，避免静默烧进作者内置的公益服务器地址
+      - name: 校验 secret
+        shell: bash
+        env:
+          S: ${{ secrets.AIRHAND_SERVER }}
+          F: ${{ secrets.AIRHAND_SERVER_FP }}
+        run: |
+          if [ -z "$S" ] || [ -z "$F" ]; then
+            echo "::error::缺少 AIRHAND_SERVER 或 AIRHAND_SERVER_FP secret"
+            exit 1
+          fi
+          if ! printf '%s' "$F" | tr -d ': ' | grep -Eq '^[0-9a-fA-F]{64}$'; then
+            echo "::error::AIRHAND_SERVER_FP 不是 64 位十六进制"
+            exit 1
+          fi
+          case "$S" in
+            http*://*) echo "::error::AIRHAND_SERVER 只写 host:port，不要带协议前缀"; exit 1 ;;
+          esac
+          echo "中继地址：$S（指纹格式校验通过）"
 
       - uses: actions/setup-node@v4
         with:
@@ -60,6 +79,22 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - name: 校验 secret
+        shell: bash
+        env:
+          S: ${{ secrets.AIRHAND_SERVER }}
+          F: ${{ secrets.AIRHAND_SERVER_FP }}
+        run: |
+          if [ -z "$S" ] || [ -z "$F" ]; then
+            echo "::error::缺少 AIRHAND_SERVER 或 AIRHAND_SERVER_FP secret"
+            exit 1
+          fi
+          if ! printf '%s' "$F" | tr -d ': ' | grep -Eq '^[0-9a-fA-F]{64}$'; then
+            echo "::error::AIRHAND_SERVER_FP 不是 64 位十六进制"
+            exit 1
+          fi
+          echo "中继地址：$S（指纹格式校验通过）"
 
       - uses: actions/setup-node@v4
         with:
