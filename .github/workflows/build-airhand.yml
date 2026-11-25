@@ -4,25 +4,49 @@
 #   AIRHAND_SERVER      形如 192.168.110.176:4433 或 www.example.com:4433（不要带 http://，不要加引号）
 #   AIRHAND_SERVER_FP   64 位十六进制指纹（服务器日志里打印的那串，冒号可留可去）
 #
-# 触发：Actions → 左侧 build-airhand → Run workflow（构建默认分支，当前是 0.4.0）
-#      打 tag 推送时也会自动构建（构建的是那个 tag）
-# 产物：运行页底部的 Artifacts（airhand-windows / airhand-macos-arm64）
+# 触发：
+#   • Actions → 左侧 build-airhand → Run workflow
+#     会出现四个勾选框，取消勾选就不构建那个平台（比如只留 android）
+#   • 打 tag 推送时自动构建全部四个平台（tag 触发没有勾选框）
 #
-# 版本说明（2026-11-25 逐个打开 action.yml 核对的 runs.using，不是看版本号猜的）：
+# 产物（运行页底部 Artifacts）：
+#   airhand-windows         NSIS 安装包
+#   airhand-macos-arm64     Apple Silicon 的 dmg + app
+#   airhand-android         APK（arm64-v8a / armeabi-v7a / x86_64）
+#   airhand-ios-unsigned    未签名的 ipa，安装前必须自己重签
+#
+# 版本说明（2026-11-25 逐个打开 action.yml 核对的 runs.using）：
 #   actions/checkout@v7        node24
 #   actions/setup-node@v7      node24
+#   actions/setup-java@v6      node24
 #   actions/upload-artifact@v7 node24（v6 及更早仍是 node20，别降级）
 #   Swatinem/rust-cache@v2     node24（2.9.3）
-#   dtolnay/rust-toolchain     composite，无 node 运行时
+#   gradle/actions@v6          composite
+#   dtolnay/rust-toolchain     composite
 #
-# runner 一律用 -latest：写死版本号会像 macos-14 那样到期直接失效。
-# macOS 只出 Apple Silicon（arm64）包，不再构建 Intel / universal 版本。
-# 若某天 macos-latest 上构建异常，换成 macos-15（同为 arm64）即可。
+# macOS 桌面端只出 Apple Silicon（arm64）包，不再构建 Intel / universal 版本。
 
 name: build-airhand
 
 on:
   workflow_dispatch:
+    inputs:
+      windows:
+        description: 构建 Windows 安装包
+        type: boolean
+        default: true
+      macos:
+        description: 构建 macOS（Apple Silicon）
+        type: boolean
+        default: true
+      android:
+        description: 构建 Android APK
+        type: boolean
+        default: true
+      ios:
+        description: 构建 iOS（未签名 ipa）
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -37,6 +61,8 @@ env:
 
 jobs:
   windows:
+    # 手动触发时看勾选框；tag 推送时没有 inputs，一律构建
+    if: github.event_name != 'workflow_dispatch' || inputs.windows
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -92,6 +118,7 @@ jobs:
           if-no-files-found: error
 
   macos:
+    if: github.event_name != 'workflow_dispatch' || inputs.macos
     # macos-latest 与 macos-15 都是 arm64，编出来的就是 Apple Silicon 原生包
     runs-on: macos-latest
     steps:
@@ -143,4 +170,108 @@ jobs:
           path: |
             client/src-tauri/target/release/bundle/dmg/*.dmg
             client/src-tauri/target/release/bundle/macos/*.app
+          if-no-files-found: error
+
+  android:
+    if: github.event_name != 'workflow_dispatch' || inputs.android
+    # 上游也用 ubuntu-24.04：runner 自带 ANDROID_HOME 与 cmdline-tools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 校验 secret
+        shell: bash
+        env:
+          S: ${{ secrets.AIRHAND_SERVER }}
+          F: ${{ secrets.AIRHAND_SERVER_FP }}
+        run: |
+          if [ -z "$S" ] || [ -z "$F" ]; then
+            echo "::error::缺少 AIRHAND_SERVER 或 AIRHAND_SERVER_FP 这两个 secret"
+            exit 1
+          fi
+          if ! printf '%s' "$F" | tr -d ': ' | grep -Eq '^[0-9a-fA-F]{64}$'; then
+            echo "::error::AIRHAND_SERVER_FP 不是 64 位十六进制"
+            exit 1
+          fi
+          echo "中继地址：$S（指纹格式校验通过）"
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: 安装 cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # NDK 版本必须和 Gradle 里要求的一致，否则 cargo-ndk 找不到工具链
+      - name: 安装 Android SDK 组件
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" > /dev/null
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      # Kotlin 在 Gradle 进程内编译：CI 只构建一次，没必要单开 Kotlin 守护进程
+      - name: 编译 APK
+        working-directory: android
+        run: ./gradlew assembleRelease -Pkotlin.compiler.execution.strategy=in-process
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: airhand-android
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+  ios:
+    if: github.event_name != 'workflow_dispatch' || inputs.ios
+    # 上游注释：代码用到了新 SDK 的接口（allowBluetoothHFP），macos-15 自带的 Xcode 16.4 编不过，
+    # 必须用 Xcode 27 的镜像。xcode-27 是 GitHub 按 Xcode 版本命名的 runner 标签。
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 校验 secret
+        shell: bash
+        env:
+          S: ${{ secrets.AIRHAND_SERVER }}
+          F: ${{ secrets.AIRHAND_SERVER_FP }}
+        run: |
+          if [ -z "$S" ] || [ -z "$F" ]; then
+            echo "::error::缺少 AIRHAND_SERVER 或 AIRHAND_SERVER_FP 这两个 secret"
+            exit 1
+          fi
+          if ! printf '%s' "$F" | tr -d ': ' | grep -Eq '^[0-9a-fA-F]{64}$'; then
+            echo "::error::AIRHAND_SERVER_FP 不是 64 位十六进制"
+            exit 1
+          fi
+          echo "中继地址：$S（指纹格式校验通过）"
+
+      - name: 选择 Xcode
+        run: |
+          if [ -n "${XCODE_VERSION:-}" ]; then
+            sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app"
+          fi
+          xcodebuild -version
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      # 不设 TEAM_ID：产出 ad-hoc 签名的 IPA，安装前要自己重签（见 docs/ios.md）
+      - name: 编译 IPA
+        run: ios/scripts/build-ipa.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: airhand-ios-unsigned
+          path: ios/build/Airhand.ipa
           if-no-files-found: error
