@@ -128,6 +128,24 @@ export const IconMicOff = (p: P) =>
       <path d="M5.5 11a6.5 6.5 0 0 0 10.4 5.2M18.4 12.6c.07-.5.1-1 .1-1.6M12 17.5V21M9 21h6M4 4l16 16" />
     </>,
   );
+/** 盾牌里一只闭着的眼睛（防窥模式开着：对方的屏幕看不到） */
+export const IconShield = (p: P) =>
+  base(
+    p,
+    <>
+      <path d="M12 3l7.5 3v5.5c0 4.6-3.2 8.3-7.5 9.5-4.3-1.2-7.5-4.9-7.5-9.5V6z" />
+      <path d="M8.5 11.5c1.9 2 5.1 2 7 0M10 13.6l-.7 1.1M14 13.6l.7 1.1" />
+    </>,
+  );
+/** 空的盾牌（防窥模式关着） */
+export const IconShieldOff = (p: P) =>
+  base(
+    p,
+    <>
+      <path d="M12 3l7.5 3v5.5c0 4.6-3.2 8.3-7.5 9.5-4.3-1.2-7.5-4.9-7.5-9.5V6z" />
+      <path d="M9 12h6" />
+    </>,
+  );
 export const IconExpand = (p: P) => base(p, <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />);
 export const IconShrink = (p: P) => base(p, <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />);
 export const IconPower = (p: P) => base(p, <path d="M12 3v8M6.4 6.6a8 8 0 1 0 11.2 0" />);

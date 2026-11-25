@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "airhand-link"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "airhand-proto",
  "anyhow",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "airhand-proto"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "minicbor",
  "serde",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "airhand-web"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "airhand-link",
  "airhand-proto",

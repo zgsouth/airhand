@@ -36,6 +36,16 @@
 ; airhand.exe 启动时也会去掉它们（src/winsvc/mod.rs 的 forget_installer_env）。
 ; 删除配置文件时服务已经停了（PREUNINSTALL），服务里"配置文件被删掉就重新生成"的检查不会再把它写回来。
 ;
+; 虚拟显示器驱动（MttVDD，随包带在安装目录的 vdd\ 里，见 windows/vdd/README.md 和 src/host/virtual_display/）：
+; 显示器关了电源也能远程控制、防窥模式都靠它。只在为所有用户安装时有用（被控端是 SYSTEM，才能启用、停用它）：
+; * 安装：Airhand 装过它（注册表里有记录）就升级；没装过、也没问过就问一次（不管答什么都记下问过了，升级时不再问）。
+;   静默、被动安装不问、不装。装的时候 Windows 可能弹出"要安装这个设备软件吗"（驱动不是微软签名的），
+;   所以用 ExecWait 在前台运行 `--install-vdd`（nsExec 会把窗口藏起来），在启动服务之前；
+; * 卸载：确认页之前多一页（un.AirhandVddPage），勾选"同时删除虚拟显示器驱动"（默认不勾）。
+;   Airhand 装的才问；静默、被动卸载和升级（AIRHAND_UPGRADE）时不问、留着。不管删不删，`--uninstall` 都先把它停用、
+;   防窥撤下的显示器放回去。模板自己的确认页上加不了勾选框（它的 un.ConfirmShow 画了"删除应用程序数据"），
+;   这个文件又在模板声明页面之前引入，所以这一页排在确认页前面。
+;
 ; 这个文件在模板的大部分定义之前引入：模板的 ${UNINSTKEY} 这些还没定义、语言还没加载，$MultiUser.InstallMode 也还没声明。
 ; 所以这里的函数用不了它们（插在安装、卸载步骤里的 NSIS_HOOK_* 宏展开得晚，可以用），LangString 直接用语言 ID
 ; （2052 简体中文、1033 英语，和 tauri.conf.json 的 languages 对应）。
@@ -48,6 +58,10 @@
 ; 和 src/winsvc/mod.rs 的 STARTUP_APPROVED_KEY 一样：任务管理器"启动应用"里对 Run 项的启用 / 禁用记录，值名和 Run 里的一样。
 ; HKLM 的 Run 项记在 HKLM 下，HKCU 的记在 HKCU 下，所以和 Run 项一样按 SHCTX 删
 !define AIRHAND_STARTUPKEY "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+; 和 src/host/virtual_display/device.rs 的 RECORD 一样：Airhand 装的虚拟显示器驱动（Instance）、问过用户了（Asked，只有安装包用）
+!define AIRHAND_VDDKEY "Software\Airhand\VirtualDisplay"
+
+!include nsDialogs.nsh
 
 ; 1：有管理员权限（安装 / 卸载程序已经提升了权限）
 Var AirhandAdmin
@@ -82,6 +96,22 @@ LangString AirhandUserFailed 2052 "无法完成 Airhand 的安装（$0），Airh
 LangString AirhandUserFailed 1033 "Can't finish installing Airhand ($0), it won't run."
 LangString AirhandServiceFailed 2052 "无法安装 Airhand 系统服务（$0），本机将不能被远程控制。"
 LangString AirhandServiceFailed 1033 "Can't install the Airhand system service ($0), this computer can't be controlled remotely."
+
+; 虚拟显示器驱动（见文件开头）
+LangString AirhandAskVdd 2052 "要安装虚拟显示器驱动吗？$\r$\n$\r$\n装上之后：$\r$\n• 这台电脑的显示器关了电源（或者没接显示器）也能被远程控制；$\r$\n• 控制端可以打开防窥模式：这台电脑的显示器全部黑屏、键盘鼠标不起作用，只有控制端看得到、操作得了。$\r$\n$\r$\n驱动来自开源项目 Virtual Display Driver（MIT 许可），平时停用着，不显示任何东西。Windows 可能会问是否安装发布者为$\"SignPath Foundation$\"的设备软件，请选择安装。$\r$\n$\r$\n以后也可以以管理员身份运行 airhand.exe --install-vdd 安装；卸载 Airhand 时可以选择一起删除。"
+LangString AirhandAskVdd 1033 "Install the virtual display driver?$\r$\n$\r$\nWith it:$\r$\n• this computer can be controlled remotely even when its monitor is switched off (or there's no monitor);$\r$\n• controllers can turn on privacy mode: this computer's monitors go blank and its keyboard and mouse stop working, so only the controller can see and control it.$\r$\n$\r$\nThe driver comes from the open-source Virtual Display Driver project (MIT license) and stays disabled, showing nothing, until it's needed. Windows may ask whether to install device software from $\"SignPath Foundation$\": choose Install.$\r$\n$\r$\nYou can also install it later by running airhand.exe --install-vdd as administrator, and remove it when uninstalling Airhand."
+LangString AirhandVddFailed 2052 "没能安装虚拟显示器驱动：显示器关了电源时不能远程控制，也不能使用防窥模式。$\r$\n$\r$\n以后可以以管理员身份运行 airhand.exe --install-vdd 重试。"
+LangString AirhandVddFailed 1033 "Couldn't install the virtual display driver: this computer can't be controlled while its monitor is off, and privacy mode isn't available.$\r$\n$\r$\nYou can retry later by running airhand.exe --install-vdd as administrator."
+LangString AirhandVddForeign 2052 "这台电脑已经装有别的程序（例如 Sunshine）在用的 Virtual Display Driver。Airhand 不改动它，所以不能使用防窥模式，显示器关了电源时也不能远程控制。"
+LangString AirhandVddForeign 1033 "Another program (Sunshine, for example) already uses a Virtual Display Driver on this computer. Airhand leaves it alone, so privacy mode isn't available and this computer can't be controlled while its monitor is off."
+LangString AirhandVddPageTitle 2052 "虚拟显示器驱动"
+LangString AirhandVddPageTitle 1033 "Virtual display driver"
+LangString AirhandVddPageSubtitle 2052 "选择是否一起删除"
+LangString AirhandVddPageSubtitle 1033 "Choose whether to remove it too"
+LangString AirhandVddPageText 2052 "安装 Airhand 时装了虚拟显示器驱动（Virtual Display Driver），显示器关了电源时的远程控制和防窥模式用的就是它。$\r$\n$\r$\n它平时停用着，不显示任何东西。留着的话，以后重新安装 Airhand 时不用再装；也可以之后在设备管理器的$\"显示适配器$\"里卸载它。"
+LangString AirhandVddPageText 1033 "The virtual display driver (Virtual Display Driver) was installed with Airhand: remote control while the monitor is off and privacy mode use it.$\r$\n$\r$\nIt stays disabled and shows nothing. If you keep it, reinstalling Airhand later won't need to install it again; you can also uninstall it later under $\"Display adapters$\" in Device Manager."
+LangString AirhandVddRemove 2052 "同时删除虚拟显示器驱动"
+LangString AirhandVddRemove 1033 "Also remove the virtual display driver"
 
 ; 选择安装目录的页面：说明两种方式各能装在哪里（不符合时"下一步"不能点，见 .onVerifyInstDir）
 LangString AirhandDirTop 2052 "为所有用户安装时只能装在 Program Files 里：Airhand 作为系统服务运行，别的位置普通用户可能改得了它的程序。仅为我安装时不能装在 Program Files 或 Windows 文件夹里：设置要保存在程序旁边。"
@@ -346,6 +376,31 @@ FunctionEnd
   ${If} $AirhandExisting == ""
     DeleteRegValue SHCTX "${AIRHAND_STARTUPKEY}" "Airhand"
   ${EndIf}
+  ; 虚拟显示器驱动（见文件开头）：启动服务之前装好、停用好
+  ${If} $MultiUser.InstallMode == "AllUsers"
+    ReadRegStr $0 HKLM "${AIRHAND_VDDKEY}" "Instance"
+    ${If} $0 != ""
+      DetailPrint "Updating the virtual display driver…"
+      ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --install-vdd' $0
+    ${Else}
+      ReadRegDWORD $1 HKLM "${AIRHAND_VDDKEY}" "Asked"
+      ${If} $1 <> 1
+      ${AndIfNot} ${Silent}
+      ${AndIf} $PassiveMode <> 1
+        WriteRegDWORD HKLM "${AIRHAND_VDDKEY}" "Asked" 1
+        MessageBox MB_YESNO|MB_ICONQUESTION "$(AirhandAskVdd)" IDNO airhand_vdd_done
+        DetailPrint "Installing the virtual display driver…"
+        ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --install-vdd' $0
+        ; 2：用户在 Windows 的提示里选了不装，不用再说
+        ${If} $0 == 1
+          MessageBox MB_ICONEXCLAMATION "$(AirhandVddFailed)"
+        ${ElseIf} $0 == 3
+          MessageBox MB_ICONINFORMATION "$(AirhandVddForeign)"
+        ${EndIf}
+        airhand_vdd_done:
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
   ${If} $MultiUser.InstallMode == "CurrentUser"
     DetailPrint "Setting up Airhand for this user…"
     nsExec::ExecToLog '"$INSTDIR\${MAINBINARYNAME}.exe" --install-user'
@@ -369,6 +424,56 @@ FunctionEnd
 !macroend
 
 ; ───────────────────────────── 卸载程序 ─────────────────────────────
+
+; 卸载时要不要一起删除虚拟显示器驱动（见文件开头）：1 是要
+Var AirhandRemoveVdd
+Var AirhandVddCheckbox
+UninstPage custom un.AirhandVddPage un.AirhandVddPageLeave
+
+Function un.AirhandVddPage
+  StrCpy $AirhandRemoveVdd 0
+  ${If} ${Silent}
+    Abort
+  ${EndIf}
+  Push $0
+  ; 被动卸载、升级时由安装程序启动的旧版本卸载程序：不问，留着
+  ClearErrors
+  ${GetOptions} $CMDLINE "/P" $0
+  ${IfNot} ${Errors}
+    Pop $0
+    Abort
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} $CMDLINE "/UPDATE" $0
+  ${IfNot} ${Errors}
+    Pop $0
+    Abort
+  ${EndIf}
+  ReadEnvStr $0 AIRHAND_UPGRADE
+  ${If} $0 == "1"
+    Pop $0
+    Abort
+  ${EndIf}
+  ; 不是 Airhand 装的（或者没装）：不关我们的事
+  ReadRegStr $0 HKLM "${AIRHAND_VDDKEY}" "Instance"
+  ${If} $0 == ""
+    Pop $0
+    Abort
+  ${EndIf}
+  Pop $0
+  !insertmacro MUI_HEADER_TEXT "$(AirhandVddPageTitle)" "$(AirhandVddPageSubtitle)"
+  nsDialogs::Create 1018
+  Pop $0
+  ${NSD_CreateLabel} 0 0 100% 60u "$(AirhandVddPageText)"
+  Pop $0
+  ${NSD_CreateCheckbox} 0 68u 100% 12u "$(AirhandVddRemove)"
+  Pop $AirhandVddCheckbox
+  nsDialogs::Show
+FunctionEnd
+
+Function un.AirhandVddPageLeave
+  ${NSD_GetState} $AirhandVddCheckbox $AirhandRemoveVdd
+FunctionEnd
 
 !define MUI_CUSTOMFUNCTION_UNGUIINIT un.AirhandGuiInit
 Function un.AirhandGuiInit
@@ -433,6 +538,12 @@ FunctionEnd
       DeleteRegValue HKCU "${AIRHAND_USERKEY}" "UserInstall"
     ${EndIf}
   ${EndIf}
+  ; 勾选了一起删除虚拟显示器驱动（un.AirhandVddPage）：服务已经停了、虚拟显示器停用了，要在删文件之前运行
+  ${If} $AirhandRemoveVdd == ${BST_CHECKED}
+    DetailPrint "Removing the virtual display driver…"
+    nsExec::ExecToLog '"$INSTDIR\${MAINBINARYNAME}.exe" --uninstall-vdd'
+    Pop $0
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
@@ -457,6 +568,13 @@ FunctionEnd
     DeleteRegKey /ifempty HKCU "${AIRHAND_USERKEY}"
     ; 任务管理器"启动应用"里对 Run 项的启用 / 禁用记录（见文件开头）：为所有用户安装时在 HKLM，仅为我安装时在 HKCU
     DeleteRegValue SHCTX "${AIRHAND_STARTUPKEY}" "Airhand"
+    ; 没装虚拟显示器驱动（问过、没要）：问过的记录也删掉，重新安装时再问。装着的话记录留着（重新安装时认得它）；
+    ; 删掉了的话 --uninstall-vdd 已经整个删掉了。它在 MANUKEY 下面（上面删 MANUKEY 时还不是空的）：删完再试一次
+    ReadRegStr $2 HKLM "${AIRHAND_VDDKEY}" "Instance"
+    ${If} $2 == ""
+      DeleteRegKey HKLM "${AIRHAND_VDDKEY}"
+    ${EndIf}
+    DeleteRegKey /ifempty HKLM "${MANUKEY}"
     ; Tauri 的应用数据目录（Tauri 同样只在勾选"删除应用程序数据"时删除；Airhand 不用它们，以防万一）。
     ; 要在上面按 SHCTX 删完之后再切换到当前用户
     SetShellVarContext current

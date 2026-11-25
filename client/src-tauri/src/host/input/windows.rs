@@ -22,6 +22,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::keymap::{self, Key};
 
+/// 注入的每个事件都带着的记号（`dwExtraInfo`）：防窥模式挡住本机键盘鼠标时，只放过带着它的注入输入
+/// （见 `host::virtual_display` 的 `block`）。别的程序也能注入输入（屏幕键盘、按键精灵），只看"是不是注入的"不够
+pub(crate) const INJECTED: usize = 0x4169_7248; // "AirH"
+
 #[derive(Default)]
 pub struct WinInjector {
     keys: HashSet<Key>,
@@ -39,7 +43,7 @@ fn mouse(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32, data: u32) -> INPUT {
                 mouseData: data,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: INJECTED,
             },
         },
     }
@@ -54,7 +58,7 @@ fn keybd(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
                 wScan: scan,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: INJECTED,
             },
         },
     }

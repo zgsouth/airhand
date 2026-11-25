@@ -1,19 +1,21 @@
-//! macOS 被控端的公共部分：系统权限、显示器枚举、CoreMedia 时间换算、线程优先级。
+//! macOS 被控端的公共部分：系统权限、显示器枚举、笔记本的盖子、锁屏状态、CoreMedia 时间换算、线程优先级。
 //!
 //! macOS 上采集屏幕 / 系统声音需要"屏幕与系统录音"权限，注入键鼠需要"辅助功能"权限，
 //! 都只能由本机用户在"系统设置 → 隐私与安全性"里授予。被控端启动时会请求一次（系统弹出对话框），
 //! 没有授权时托盘菜单里会一直提示，并且可以直接打开对应的设置页面。
 
-use std::ffi::c_void;
-use std::sync::Once;
+use std::ffi::{c_char, c_void};
+use std::ptr::NonNull;
+use std::sync::{Once, OnceLock};
 use std::time::Instant;
 
 use airhand_proto::session::DisplayInfo;
 use anyhow::{Result, anyhow};
-use objc2_core_foundation::{CFBoolean, CFDictionary, CFString};
+use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayIsMain,
     CGDisplayMirrorsDisplay, CGDisplayMode, CGError, CGGetActiveDisplayList,
+    CGGetOnlineDisplayList, CGSessionCopyCurrentDictionary,
 };
 use objc2_core_media::{CMClock, CMTime, CMTimeFlags};
 
@@ -29,6 +31,22 @@ unsafe extern "C" {
     fn AXIsProcessTrusted() -> u8;
     fn AXIsProcessTrustedWithOptions(options: *const c_void) -> u8;
     static kAXTrustedCheckOptionPrompt: *const c_void;
+}
+
+/// `io_object_t`
+type IoObject = u32;
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    /// 返回的字典交给 `IOServiceGetMatchingService`（它负责释放）
+    fn IOServiceMatching(name: *const c_char) -> *mut c_void;
+    fn IOServiceGetMatchingService(main_port: u32, matching: *mut c_void) -> IoObject;
+    fn IORegistryEntryCreateCFProperty(
+        entry: IoObject,
+        key: &CFString,
+        allocator: *const c_void,
+        options: u32,
+    ) -> Option<NonNull<CFType>>;
 }
 
 /// 被控端需要的系统权限是否已经授予。
@@ -161,6 +179,18 @@ impl Display {
     }
 }
 
+/// 接着的显示器（亮着的、睡着的、镜像的都算）的编号。睡着的显示器可能不在 [`displays`] 里，但在这里
+pub fn online_display_ids() -> Vec<CGDirectDisplayID> {
+    let mut ids = [0 as CGDirectDisplayID; 32];
+    let mut n = 0u32;
+    if unsafe { CGGetOnlineDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut n) }
+        != CGError::Success
+    {
+        return Vec::new();
+    }
+    ids[..(n as usize).min(ids.len())].to_vec()
+}
+
 /// 列出所有显示器：主显示器排第一，其余按坐标从左到右。镜像显示器只算一个。
 pub fn displays() -> Vec<Display> {
     let mut ids = [0 as CGDirectDisplayID; 32];
@@ -175,14 +205,15 @@ pub fn displays() -> Vec<Display> {
         .filter(|&&id| CGDisplayMirrorsDisplay(id) == 0)
         .map(|&id| {
             let b = CGDisplayBounds(id);
-            let mode = CGDisplayCopyDisplayMode(id);
-            let (pw, ph) = mode
-                .as_deref()
-                .map(|m| {
-                    (
-                        CGDisplayMode::pixel_width(Some(m)),
-                        CGDisplayMode::pixel_height(Some(m)),
-                    )
+            // 本进程建的虚拟显示器在本进程里读不到显示模式（别的进程读得到）：用建它时定的大小
+            let (pw, ph) = super::virtual_display::pixels(id)
+                .map(|(w, h)| (w as usize, h as usize))
+                .or_else(|| {
+                    let mode = CGDisplayCopyDisplayMode(id)?;
+                    Some((
+                        CGDisplayMode::pixel_width(Some(&mode)),
+                        CGDisplayMode::pixel_height(Some(&mode)),
+                    ))
                 })
                 .filter(|&(w, h)| w > 0 && h > 0)
                 .unwrap_or((b.size.width as usize, b.size.height as usize));
@@ -241,6 +272,55 @@ pub fn display_infos() -> Vec<DisplayInfo> {
         .collect()
 }
 
+// ───────────────────────────── 盖子 ─────────────────────────────
+
+/// 笔记本的盖子合着没有：`IOPMrootDomain` 的 `AppleClamshellState`。没有盖子（台式机）、读不出来时是 `None`。
+///
+/// 合着盖子时内建的显示器用不了：系统把它关掉，叫醒它也只是在盖子后面亮 10 秒又关掉（采集跟着断一次，
+/// 见 `power::wake_display`）；补屏的虚拟显示器顶上（见 `virtual_display`）
+pub fn lid_state() -> Option<bool> {
+    // 电源管理的根节点一直都在，取一次就够了（不释放）
+    static ROOT: OnceLock<IoObject> = OnceLock::new();
+    let root = *ROOT.get_or_init(|| unsafe {
+        IOServiceGetMatchingService(0, IOServiceMatching(c"IOPMrootDomain".as_ptr()))
+    });
+    if root == 0 {
+        return None;
+    }
+    let key = CFString::from_static_str("AppleClamshellState");
+    let value = unsafe { IORegistryEntryCreateCFProperty(root, &key, std::ptr::null(), 0) }?;
+    let value = unsafe { CFRetained::from_raw(value) };
+    value.downcast_ref::<CFBoolean>().map(CFBoolean::as_bool)
+}
+
+/// 笔记本的盖子合着（见 [`lid_state`]）
+pub fn lid_closed() -> bool {
+    lid_state() == Some(true)
+}
+
+// ───────────────────────────── 锁屏 ─────────────────────────────
+
+/// 当前图形会话的信息里"屏幕锁着"的那一项。没有公开文档，但一直这样用：锁着时是 true，没锁时通常根本没有这一项
+const SCREEN_IS_LOCKED: &str = "CGSSessionScreenIsLocked";
+
+/// 屏幕锁着没有（锁屏界面、屏幕保护要了密码）。不在图形会话里（例如 SSH 里运行）时是 `None`。
+/// 采集线程据此在锁屏、解锁时重新打开采集（见 `capture::sck`）
+pub fn screen_locked() -> Option<bool> {
+    let session = CGSessionCopyCurrentDictionary()?;
+    // 键都是字符串，值是各种 CF 类型
+    let session: CFRetained<CFDictionary<CFString, CFType>> =
+        unsafe { CFRetained::cast_unchecked(session) };
+    Some(is_locked(&session))
+}
+
+/// 会话信息里说屏幕锁着（没有这一项、不是布尔值都算没锁）
+fn is_locked(session: &CFDictionary<CFString, CFType>) -> bool {
+    session
+        .get(&CFString::from_static_str(SCREEN_IS_LOCKED))
+        .and_then(|v| v.downcast_ref::<CFBoolean>().map(CFBoolean::as_bool))
+        .unwrap_or(false)
+}
+
 // ───────────────────────────── 时间 ─────────────────────────────
 
 /// CoreMedia 时间戳（ScreenCaptureKit 的画面帧和声音包都用主机时钟）对应的时刻。
@@ -275,6 +355,36 @@ mod tests {
             assert_eq!(display(0).unwrap(), *first);
         }
         assert!(display(200).is_err());
+    }
+
+    /// 盖子：笔记本上读得出来（跑测试的时候一般开着），台式机上没有
+    #[test]
+    fn lid() {
+        let state = lid_state();
+        println!("lid closed: {state:?}");
+        assert_eq!(lid_closed(), state == Some(true));
+        // 亮着的显示器都接着
+        let online = online_display_ids();
+        for d in displays() {
+            assert!(online.contains(&d.id), "{d:?}");
+        }
+    }
+
+    /// 会话信息里的锁屏标记：没有这一项、不是布尔值都算没锁
+    #[test]
+    fn lock_flag() {
+        let key = CFString::from_static_str(SCREEN_IS_LOCKED);
+        let other = CFString::from_static_str("kCGSessionOnConsoleKey");
+        let yes: &CFType = CFBoolean::new(true);
+        let no: &CFType = CFBoolean::new(false);
+        let text = CFString::from_static_str("1");
+        let dict = |k: &CFString, v: &CFType| CFDictionary::from_slices(&[k], &[v]);
+        assert!(is_locked(&dict(&key, yes)));
+        assert!(!is_locked(&dict(&key, no)));
+        assert!(!is_locked(&dict(&other, yes)));
+        assert!(!is_locked(&dict(&key, &text)));
+        // 跑测试的电脑一般没锁着；没有图形会话时是 None
+        println!("screen locked: {:?}", screen_locked());
     }
 
     /// "缺少权限"包在别的错误说明里也要认得出来（采集线程据此不把它当作采集失败）

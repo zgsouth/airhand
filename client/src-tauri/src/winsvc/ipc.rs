@@ -91,6 +91,10 @@ pub enum ToAgent {
     SetLanguage {
         lang: crate::i18n::Lang,
     },
+    /// 托盘菜单里的"结束远程后锁屏"（见 `crate::host::ending`）：写进 config.toml，马上生效
+    SetLockOnEnd {
+        on: bool,
+    },
 }
 
 async fn send_line<W: AsyncWrite + Unpin>(w: &mut W, msg: &impl Serialize) -> Result<()> {
@@ -223,7 +227,7 @@ async fn serve_tray(pipe: NamedPipeServer, hub: StatusHub, agent: Agent) -> Resu
             line = lines.next_line() => {
                 let Some(line) = line? else { return Ok(()) };
                 match serde_json::from_str::<ToAgent>(&line) {
-                    Ok(msg) => handle(msg, &agent).await,
+                    Ok(msg) => handle(msg, &agent, &hub).await,
                     Err(e) => warn!("invalid message from the tray: {e}"),
                 }
             }
@@ -231,7 +235,7 @@ async fn serve_tray(pipe: NamedPipeServer, hub: StatusHub, agent: Agent) -> Resu
     }
 }
 
-async fn handle(msg: ToAgent, agent: &Agent) {
+async fn handle(msg: ToAgent, agent: &Agent, hub: &StatusHub) {
     let (cmds, autostart) = (&agent.cmds, &agent.autostart);
     match msg {
         ToAgent::KickAll => {
@@ -265,6 +269,11 @@ async fn handle(msg: ToAgent, agent: &Agent) {
                 Ok(Err(e)) => warn!("can't save the UI language: {e:#}"),
                 Err(e) => warn!("can't save the UI language: {e}"),
             }
+        }
+        ToAgent::SetLockOnEnd { on } => {
+            let hub = hub.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || crate::host::set_lock_on_end(&hub, on)).await;
         }
         ToAgent::SetAutostart { on } => {
             let r = tokio::task::spawn_blocking(move || {
@@ -514,6 +523,14 @@ mod tests {
 
         hub.send_modify(|s| s.host.code = Some(123_456));
         assert_eq!(next().await.host.code, Some(123_456));
+
+        // 托盘菜单里关掉"结束远程后锁屏"：被控端记下，托盘里跟着变
+        send_line(&mut w, &ToAgent::SetLockOnEnd { on: false })
+            .await
+            .unwrap();
+        assert_eq!(next().await.host.lock_on_end, Some(false));
+        assert!(!crate::host::ending::lock_on_end());
+        crate::host::ending::set_lock_on_end(true);
 
         send_line(&mut w, &ToAgent::NewCode).await.unwrap();
         let cmd = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())

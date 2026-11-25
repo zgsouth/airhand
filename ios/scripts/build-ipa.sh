@@ -9,6 +9,8 @@
 #   EXPORT_METHOD 选 development（默认）/ ad-hoc / app-store-connect / enterprise，生成签好名、能直接安装的 build/export/Airhand.ipa。
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# xcodebuild 的输出只留错误和结果。标准错误输出也并进来（2>&1）：Xcode 在里面打很多无关的 [MT] 日志
+# （如没装运行时的模拟器的 DVTAssertions 警告），真正的错误都带“error:”
 export PATH="$HOME/.cargo/bin:$PATH"
 
 XCODEGEN="$(command -v xcodegen || echo "$HOME/airhand-ios-setup/xcodegen/bin/xcodegen")"
@@ -27,7 +29,7 @@ if [ -n "${TEAM_ID:-}" ]; then
   xcodebuild -project Airhand.xcodeproj -scheme Airhand -configuration Release -sdk iphoneos \
     -destination 'generic/platform=iOS' -archivePath build/Airhand.xcarchive \
     DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic CODE_SIGN_IDENTITY="Apple Development" \
-    AIRHAND_SERVER="$SERVER" AIRHAND_SERVER_FP="$FP" -allowProvisioningUpdates archive | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)"
+    AIRHAND_SERVER="$SERVER" AIRHAND_SERVER_FP="$FP" -allowProvisioningUpdates archive 2>&1 | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)"
   cat > build/ExportOptions.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -38,7 +40,7 @@ if [ -n "${TEAM_ID:-}" ]; then
 </dict></plist>
 EOF
   xcodebuild -exportArchive -archivePath build/Airhand.xcarchive -exportPath build/export \
-    -exportOptionsPlist build/ExportOptions.plist -allowProvisioningUpdates | grep -E "error:|EXPORT (SUCCEEDED|FAILED)"
+    -exportOptionsPlist build/ExportOptions.plist -allowProvisioningUpdates 2>&1 | grep -E "error:|EXPORT (SUCCEEDED|FAILED)"
   echo "已生成：$(pwd)/build/export/Airhand.ipa"
   exit 0
 fi
@@ -47,7 +49,7 @@ rm -rf build/dd-release build/Payload build/Airhand.ipa
 xcodebuild -project Airhand.xcodeproj -scheme Airhand -configuration Release -sdk iphoneos \
   -destination 'generic/platform=iOS' -derivedDataPath build/dd-release \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-  AIRHAND_SERVER="$SERVER" AIRHAND_SERVER_FP="$FP" build | grep -E "error:|BUILD (SUCCEEDED|FAILED)"
+  AIRHAND_SERVER="$SERVER" AIRHAND_SERVER_FP="$FP" build 2>&1 | grep -E "error:|BUILD (SUCCEEDED|FAILED)"
 
 APP=build/dd-release/Build/Products/Release-iphoneos/Airhand.app
 mkdir -p build/Payload

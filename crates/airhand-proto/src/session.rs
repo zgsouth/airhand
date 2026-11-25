@@ -128,6 +128,18 @@
 //! （[`crate::files::FileMsg::Offer`]），粘贴时才传内容（文件通道 [`crate::SessionLane::File`]），两个方向一样，
 //! 见 [`crate::files`]。消息包在 [`HostMsg::Files`] / [`ControllerMsg::Files`] 里，走哪条通道看里面的消息。
 //! 文字和文件互相取代：剪贴板里只有最近的一样。
+//!
+//! # 防窥模式
+//!
+//! 控制端可以让被控端的本机屏幕看不到画面、本机的键盘鼠标不起作用，只有控制端能看、能操作
+//! （装了虚拟显示器驱动的 Windows 被控端、允许了"辅助功能"的 macOS 被控端支持）：
+//!
+//! * 被控端在 [`HostMsg::Hello`] 之后发 [`HostMsg::Privacy`]，说明现在能不能开、开着没有（[`PrivacyState`]），
+//!   之后有变化再发。不支持的被控端不发，控制端也就不显示这个开关；
+//! * 控制端用 [`ControllerMsg::Privacy`] 打开、关闭。开着是整台被控端的事：几个控制端看到的是同一个状态，
+//!   哪一个都能关；打开它的控制端都断开了，过一会儿（给它重连的时间）自动关闭；
+//! * 重连时控制端在握手的介绍里说要不要开着（[`crate::handshake::ControllerIntro::privacy`]）：被控端一开始就
+//!   保持防窥，本机屏幕不会在重连的间隙露出来。
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -208,6 +220,34 @@ pub enum HostMsg {
     /// 不认识的（对方版本新增的）是 `None`：跳过
     #[n(13)]
     Files(#[cbor(n(0), with = "crate::cbor::opt", has_nil)] Option<FileMsg>),
+    /// 防窥模式现在怎么样（见模块说明的"防窥模式"）。Hello 之后发一次，之后有变化再发；不支持的被控端不发。
+    /// `detail`：开不了时给排查问题用的技术信息（英文，同 [`Notice::CaptureFailed`]）
+    #[n(14)]
+    Privacy {
+        #[n(0)]
+        state: PrivacyState,
+        #[n(1)]
+        detail: Option<String>,
+    },
+}
+
+open_enum! {
+    /// 被控端的防窥模式（见模块说明的"防窥模式"）。不认识的值（对方版本新增的）控制端当作不支持
+    pub enum PrivacyState {
+        /// 这台被控端还不能开：Windows 没有装虚拟显示器驱动，或者 Airhand 不是为所有用户安装的；
+        /// macOS 没有允许 Airhand 使用"辅助功能"（挡住本机的键盘鼠标要用到）
+        Unavailable = 0 => "unavailable",
+        /// 被控端的设置不允许
+        NotAllowed = 1 => "notAllowed",
+        /// 能开，现在关着
+        Off = 2 => "off",
+        /// 正在打开（Windows 换成虚拟显示器要几秒钟）
+        Starting = 3 => "starting",
+        /// 开着：本机的显示器不显示画面，本机的键盘鼠标不起作用
+        On = 4 => "on",
+        /// 刚才没能打开（已经恢复原样），detail 给出原因
+        Failed = 5 => "failed",
+    }
 }
 
 open_enum! {
@@ -263,7 +303,8 @@ impl HostMsg {
             | HostMsg::Cursor { .. }
             | HostMsg::Bye(_)
             | HostMsg::Direct(_)
-            | HostMsg::Mic { .. } => SessionLane::Control,
+            | HostMsg::Mic { .. }
+            | HostMsg::Privacy { .. } => SessionLane::Control,
         }
     }
 }
@@ -613,6 +654,12 @@ pub enum ControllerMsg {
     /// 不认识的（对方版本新增的）是 `None`：跳过
     #[n(12)]
     Files(#[cbor(n(0), with = "crate::cbor::opt", has_nil)] Option<FileMsg>),
+    /// 打开 / 关闭防窥模式（见模块说明的"防窥模式"）。被控端不支持时什么也不做
+    #[n(13)]
+    Privacy {
+        #[n(0)]
+        on: bool,
+    },
 }
 
 impl ControllerMsg {
@@ -628,7 +675,8 @@ impl ControllerMsg {
             | Self::View { .. }
             | Self::Audio { .. }
             | Self::Direct(_)
-            | Self::Mic { .. } => SessionLane::Control,
+            | Self::Mic { .. }
+            | Self::Privacy { .. } => SessionLane::Control,
         }
     }
 }
@@ -762,7 +810,8 @@ pub struct QualitySettings {
     pub draw_cursor: bool,
 }
 
-fn is_false(v: &bool) -> bool {
+/// 默认是 false 的开关不写进线上的数组（光标、介绍里的防窥模式）
+pub(crate) fn is_false(v: &bool) -> bool {
     !*v
 }
 
@@ -1109,6 +1158,22 @@ mod tests {
             SessionLane::Control
         );
 
+        // 防窥模式：新版本加的状态留着原值（控制端当作不支持）
+        let privacy = HostMsg::Privacy {
+            state: PrivacyState::Unknown(42),
+            detail: Some("x".into()),
+        };
+        let back: HostMsg = minicbor::decode(&minicbor::to_vec(&privacy).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            HostMsg::Privacy { state: PrivacyState::Unknown(42), detail: Some(ref d) } if d == "x"
+        ));
+        assert_eq!(back.lane(), SessionLane::Control);
+        let on = ControllerMsg::Privacy { on: true };
+        assert_eq!(on.lane(), SessionLane::Control);
+        let back: ControllerMsg = minicbor::decode(&minicbor::to_vec(&on).unwrap()).unwrap();
+        assert!(matches!(back, ControllerMsg::Privacy { on: true }));
+
         // 按钮不认识的输入事件：解得出来，被控端不执行
         let e = InputEvent::MouseButton {
             button: MouseButton::Unknown(12),
@@ -1192,6 +1257,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value([MicState::NoDevice, MicState::Ready]).unwrap(),
             json!(["noDevice", "ready"])
+        );
+        assert_eq!(
+            serde_json::to_value([PrivacyState::NotAllowed, PrivacyState::On]).unwrap(),
+            json!(["notAllowed", "on"])
         );
         assert_eq!(
             serde_json::to_value(StreamView {

@@ -1,5 +1,5 @@
 //! 系统托盘：图标 + 右键菜单（模式、服务器状态、控制码、切换模式、开机自动启动 / 登录时自动启动（macOS、
-//! Windows 仅为当前用户安装）、语言、退出）。
+//! Windows 仅为当前用户安装）、结束远程后锁屏、不自动睡眠（macOS）、语言、退出）。
 
 use std::sync::OnceLock;
 
@@ -209,6 +209,32 @@ fn build_menu(app: &AppHandle, st: &AppStatus) -> tauri::Result<Menu<Wry>> {
                 menu.append(&login_item_entry(app, s)?)?;
             }
         }
+    }
+    // 被控端的设置：被控端在运行（Windows 安装版：连上了服务里的被控端）、知道现在的设置时才有
+    if st.shows_host()
+        && let Some(on) = st.host.lock_on_end
+    {
+        menu.append(&CheckMenuItem::with_id(
+            app,
+            "lock_on_end",
+            tr!("结束远程后锁屏", "Lock screen when remote control ends"),
+            true,
+            on,
+            None::<&str>,
+        )?)?;
+    }
+    // 不自动睡眠（macOS，见 host::power）：同上，只在被控端在运行、知道现在的设置时才有
+    if st.shows_host()
+        && let Some(on) = st.host.prevent_sleep
+    {
+        menu.append(&CheckMenuItem::with_id(
+            app,
+            "prevent_sleep",
+            tr!("不自动睡眠", "Prevent automatic sleeping"),
+            true,
+            on,
+            None::<&str>,
+        )?)?;
     }
     #[cfg(target_os = "macos")]
     {

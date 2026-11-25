@@ -199,6 +199,8 @@ export interface ConnectOptions {
   audio: boolean;
   /** 开始时看哪几个显示器（第 i 项是第 i 路画面）；不带、空的是只看主显示器（第一次连时还不知道对方有哪些显示器） */
   view?: StreamView[];
+  /** 开始时要不要防窥模式：重连时带上现在的开关，对方的屏幕不会在重连的间隙里露出来；不带是不要 */
+  privacy?: boolean;
 }
 
 /**
@@ -235,6 +237,13 @@ export type Platform = "windows" | "mac" | "linux" | "android" | "ios";
  * noDevice = 打开转发时可安装驱动，steamMissing = 需要先安装 Steam，preparing = 正在准备设备，setupFailed = 驱动未就绪。
  */
 export type MicState = "unsupported" | "noDevice" | "ready" | "busy" | "failed" | "steamMissing" | "preparing" | "setupFailed";
+
+/**
+ * 被控端的防窥模式（airhand_proto::session::PrivacyState）：unavailable = 对方没装虚拟显示器驱动（或不是为所有用户安装的），
+ * Mac 没有允许辅助功能，notAllowed = 对方的设置不允许，starting = 正在打开（Windows 换成虚拟显示器），
+ * failed = 刚才没能打开（已恢复原样）。
+ */
+export type PrivacyState = "unavailable" | "notAllowed" | "off" | "starting" | "on" | "failed";
 
 /** 系统操作（手机的导航键等），与 airhand_proto::session::SystemAction 对应 */
 export type SystemAction =
@@ -288,6 +297,8 @@ export type SessionEvent =
   | { type: "clipboard"; text: string }
   /** 被控端能不能接本机的麦克风：会话开始时一次，之后有变化再来；对方的版本旧时没有。detail：出错时的技术信息 */
   | { type: "mic"; state: MicState; detail: string | null }
+  /** 被控端的防窥模式：会话开始时一次，之后有变化再来；对方不支持（Linux、手机、版本旧）时没有。detail：没能打开的原因 */
+  | { type: "privacy"; state: PrivacyState; detail: string | null }
   /** 被控端复制了文件（只有网页版会收到；桌面版直接放进本机剪贴板）：要内容时用 remoteList / remoteRead 取 */
   | { type: "clipboardFiles"; clip: number; items: FileEntry[] }
   /** 剪贴板里的文件传不了（被控端那边的、这边的）：哪个文件、为什么 */
@@ -327,6 +338,8 @@ export type Command =
   | { cmd: "audio"; sid: number; enabled: boolean }
   /** 打开 / 关闭本机的麦克风（打开之后 Worker 把编好的声音包发给控制端服务，见 media.ts 的 micMessage） */
   | { cmd: "mic"; sid: number; enabled: boolean }
+  /** 打开 / 关闭被控端的防窥模式（对方的显示器黑屏、键盘鼠标不起作用） */
+  | { cmd: "privacy"; sid: number; on: boolean }
   /** 把这里复制的文本发给被控端（网页版：浏览器自己读剪贴板） */
   | { cmd: "clipboard"; sid: number; text: string }
   /** 打开 / 关闭剪贴板同步 */

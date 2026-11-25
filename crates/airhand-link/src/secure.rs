@@ -947,13 +947,14 @@ async fn fail<W: AsyncWrite + Unpin>(send: &mut W, e: HandshakeError) {
     .await;
 }
 
-/// 本端的介绍（控制端）：名称、系统，开始时的画质、要不要声音、看哪几个显示器
+/// 本端的介绍（控制端）：名称、系统，开始时的画质、要不要声音、看哪几个显示器、要不要防窥模式
 pub fn controller_intro(
     name: &str,
     os: &str,
     settings: QualitySettings,
     audio: bool,
     view: Vec<StreamView>,
+    privacy: bool,
 ) -> ControllerIntro {
     ControllerIntro {
         version: SESSION_VERSION,
@@ -962,6 +963,7 @@ pub fn controller_intro(
         settings: settings.sanitized(),
         audio,
         view,
+        privacy,
     }
 }
 
@@ -1096,7 +1098,14 @@ mod tests {
             fps: 60,
             ..QualitySettings::default()
         };
-        controller_intro("ctl", "test", settings, true, vec![StreamView::display(1)])
+        controller_intro(
+            "ctl",
+            "test",
+            settings,
+            true,
+            vec![StreamView::display(1)],
+            false,
+        )
     }
 
     #[tokio::test]

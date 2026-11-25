@@ -213,12 +213,22 @@ impl Broker {
             if file_bytes > 0 {
                 info!(
                     session_id = id,
-                    file_bytes, "{}: session ended (relayed files)", s.label
+                    file_bytes,
+                    "{}: session ended, {} of clipboard files relayed",
+                    s.label,
+                    crate::format_size(file_bytes)
                 );
             } else {
                 info!(session_id = id, "{}: session ended", s.label);
             }
         }
+    }
+
+    /// (会话, 其中两端的控制通道还没都到的)
+    pub(super) fn session_counts(&self) -> (usize, usize) {
+        let sessions = self.sessions.lock();
+        let starting = sessions.values().filter(|s| !s.started()).count();
+        (sessions.len(), starting)
     }
 
     /// 两端的控制通道一直没都到的会话

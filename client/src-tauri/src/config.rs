@@ -11,7 +11,7 @@
 //! * **配置文件 `config.toml`**（见 [`Settings`]）：可以手动改服务器地址和指纹；还保存着服务器分配的控制码
 //!   （固定不变，见 `airhand_proto::signal` 的"固定控制码"）、控制台的"我的设备"（见 [`crate::devices`]），
 //!   Windows 上还有开机自动启动（macOS 上是登录时自动启动的记录，见 [`autostart_default_pending`]），
-//!   托盘菜单、控制台里选的界面语言（`language`，见 [`crate::i18n`]）。所有数据都只在这一个文件里。位置（见 [`path`]）：
+//!   托盘菜单、控制台里选的界面语言（`language`，见 [`crate::i18n`]），托盘菜单里切换的结束远程后锁屏（`lock_on_end`）、不自动睡眠（`prevent_sleep`，macOS）。所有数据都只在这一个文件里。位置（见 [`path`]）：
 //!   * Windows：程序所在目录（安装目录）。为所有用户安装时文件由系统服务里的被控端维护（见 [`crate::winsvc`]），
 //!     托盘进程没有写权限，控制台保存设备时经命名管道交给它写；仅为当前用户安装时（见 `crate::winsvc::user`）
 //!     安装目录在用户自己的目录里，由托盘进程维护；
@@ -106,6 +106,16 @@ pub struct Settings {
     pub autostart: bool,
     /// 界面语言（`language`）：托盘菜单、控制台里选过的。`None`：没选过，跟随系统语言
     pub language: Option<Lang>,
+    /// 允许控制端打开防窥模式（`privacy_mode`，Windows 装了虚拟显示器驱动时、macOS 有"辅助功能"权限时有用，
+    /// 见 `host::virtual_display`）。
+    /// 模板里没有它：要禁止时手动写上 `privacy_mode = false`
+    pub privacy_mode: bool,
+    /// 远程控制结束后锁屏（`lock_on_end`，被控端，见 `host::ending`）。模板里没有它：在托盘菜单里切换时写入
+    /// （[`save_lock_on_end`]，马上生效，不用重新启动）
+    pub lock_on_end: bool,
+    /// 不自动睡眠（`prevent_sleep`，macOS 被控端，见 `host::power`）。模板里没有它：在菜单栏图标的菜单里切换时写入
+    /// （[`save_prevent_sleep`]，马上生效，不用重新启动）
+    pub prevent_sleep: bool,
     /// 服务器分配的控制码和加密过的密钥（`[code]`），用 [`Settings::code`] 解开
     saved_code: Option<(i64, String)>,
 }
@@ -117,6 +127,9 @@ impl Default for Settings {
             server_fp: DEFAULT_SERVER_FP.to_string(),
             autostart: true,
             language: None,
+            privacy_mode: true,
+            lock_on_end: true,
+            prevent_sleep: false,
             saved_code: None,
         }
     }
@@ -223,6 +236,15 @@ fn parse(text: &str) -> Result<Settings> {
     }
     if let Some(v) = doc.get("autostart").and_then(|v| v.as_bool()) {
         s.autostart = v;
+    }
+    if let Some(v) = doc.get("privacy_mode").and_then(|v| v.as_bool()) {
+        s.privacy_mode = v;
+    }
+    if let Some(v) = doc.get("lock_on_end").and_then(|v| v.as_bool()) {
+        s.lock_on_end = v;
+    }
+    if let Some(v) = doc.get("prevent_sleep").and_then(|v| v.as_bool()) {
+        s.prevent_sleep = v;
     }
     if let Some(v) = doc.get("language").and_then(|v| v.as_str()) {
         s.language = Lang::from_code(v);
@@ -473,7 +495,7 @@ fn last() -> MutexGuard<'static, Option<String>> {
 }
 
 /// 按模板（默认配置）生成配置文件的内容。`before` 是文件被删掉之前的内容：服务器等设置回到默认，
-/// 状态接着用——开机自动启动（Windows）、选过的界面语言、本机的控制码、我的设备。只搬值，模板里的说明和顺序不动
+/// 状态接着用——开机自动启动（Windows）、选过的界面语言、结束远程后锁屏、不自动睡眠、本机的控制码、我的设备。只搬值，模板里的说明和顺序不动
 fn regenerate(before: Option<&str>) -> Result<DocumentMut> {
     let mut doc: DocumentMut = template().parse()?;
     let Some(old) = before.and_then(|t| t.parse::<DocumentMut>().ok()) else {
@@ -491,6 +513,12 @@ fn regenerate(before: Option<&str>) -> Result<DocumentMut> {
         .and_then(Lang::from_code)
     {
         put_language(&mut doc, lang);
+    }
+    if let Some(on) = old.get("lock_on_end").and_then(Item::as_bool) {
+        put_lock_on_end(&mut doc, on);
+    }
+    if let Some(on) = old.get("prevent_sleep").and_then(Item::as_bool) {
+        put_prevent_sleep(&mut doc, on);
     }
     if let (Some(from), Some(to)) = (
         old.get("code").and_then(Item::as_table_like),
@@ -733,6 +761,53 @@ fn put_language(doc: &mut DocumentMut, lang: Lang) {
         toml_edit::value(lang.code()),
         language_note,
     );
+}
+
+/// 保存"结束远程后锁屏"（托盘菜单里切换的）
+pub fn save_lock_on_end(on: bool) -> Result<()> {
+    edit(|doc| {
+        put_lock_on_end(doc, on);
+        Ok(())
+    })
+}
+
+/// 写入 `lock_on_end`（模板里没有：默认锁屏。加上时带一段说明）
+fn put_lock_on_end(doc: &mut DocumentMut, on: bool) {
+    put_setting(doc, "lock_on_end", toml_edit::value(on), lock_on_end_note);
+}
+
+/// `lock_on_end` 前面的说明
+fn lock_on_end_note() -> String {
+    tr!(
+        "# 远程控制结束后锁屏（控制端断开；断线的话等它重连 30 秒），防窥模式也随之退出。在托盘菜单\"结束远程后锁屏\"里切换时记下\n",
+        "# Lock the screen when the remote control ends (the controller disconnects; if it dropped, after 30 seconds for it to reconnect), which also ends privacy mode. Saved when you switch \"Lock screen when remote control ends\" in the tray menu\n"
+    )
+}
+
+/// 保存"不自动睡眠"（菜单栏图标的菜单里切换的，macOS）
+pub fn save_prevent_sleep(on: bool) -> Result<()> {
+    edit(|doc| {
+        put_prevent_sleep(doc, on);
+        Ok(())
+    })
+}
+
+/// 写入 `prevent_sleep`（模板里没有：默认照常睡眠。加上时带一段说明）
+fn put_prevent_sleep(doc: &mut DocumentMut, on: bool) {
+    put_setting(
+        doc,
+        "prevent_sleep",
+        toml_edit::value(on),
+        prevent_sleep_note,
+    );
+}
+
+/// `prevent_sleep` 前面的说明
+fn prevent_sleep_note() -> String {
+    tr!(
+        "# 不自动睡眠（macOS）：Airhand 作为被控端运行、接着外接电源时，电脑不因为空闲而睡眠，一直能被连接（显示器照常熄灭）。在菜单栏图标的菜单\"不自动睡眠\"里切换时记下\n",
+        "# Prevent automatic sleeping (macOS): while Airhand runs as a host on a power adapter, the computer doesn't sleep when idle, so it can always be reached (the display still turns off). Saved when you switch \"Prevent automatic sleeping\" in the menu bar icon's menu\n"
+    )
 }
 
 /// `language` 前面的说明
@@ -1274,6 +1349,64 @@ mod tests {
         // 别的账户 / 别的电脑加密的密钥打不开：当作没有控制码
         let foreign = "[code]\ncode = 123456\nsecret = \"AAAA\"\n";
         assert_eq!(parse(foreign).unwrap().code(), None);
+    }
+
+    /// 远程控制结束后默认锁屏（模板里没有这一项）；在托盘菜单里关掉时记下，带一段说明，之后只改值；
+    /// 文件被删掉重新生成时接着用
+    #[test]
+    fn lock_on_end_is_saved() {
+        let tpl = template();
+        assert!(!tpl.contains("lock_on_end"));
+        assert!(parse(&tpl).unwrap().lock_on_end);
+
+        let mut doc: DocumentMut = tpl.parse().unwrap();
+        put_lock_on_end(&mut doc, false);
+        let text = doc.to_string();
+        let note = lock_on_end_note();
+        let note = note.lines().next().unwrap();
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("missing {s:?}"));
+        assert!(at(note) < at("lock_on_end = false"));
+        assert!(at("lock_on_end = false") < at("[code]"));
+        assert!(!parse(&text).unwrap().lock_on_end);
+
+        put_lock_on_end(&mut doc, true);
+        let text = doc.to_string();
+        assert_eq!(text.matches(note).count(), 1);
+        assert_eq!(text.matches("lock_on_end = ").count(), 1);
+        assert!(parse(&text).unwrap().lock_on_end);
+
+        put_lock_on_end(&mut doc, false);
+        let again = regenerate(Some(&doc.to_string())).unwrap().to_string();
+        assert!(!parse(&again).unwrap().lock_on_end);
+    }
+
+    /// 不自动睡眠默认关（模板里没有这一项）；在菜单里打开时记下，带一段说明，之后只改值；
+    /// 文件被删掉重新生成时接着用
+    #[test]
+    fn prevent_sleep_is_saved() {
+        let tpl = template();
+        assert!(!tpl.contains("prevent_sleep"));
+        assert!(!parse(&tpl).unwrap().prevent_sleep);
+
+        let mut doc: DocumentMut = tpl.parse().unwrap();
+        put_prevent_sleep(&mut doc, true);
+        let text = doc.to_string();
+        let note = prevent_sleep_note();
+        let note = note.lines().next().unwrap();
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("missing {s:?}"));
+        assert!(at(note) < at("prevent_sleep = true"));
+        assert!(at("prevent_sleep = true") < at("[code]"));
+        assert!(parse(&text).unwrap().prevent_sleep);
+
+        put_prevent_sleep(&mut doc, false);
+        let text = doc.to_string();
+        assert_eq!(text.matches(note).count(), 1);
+        assert_eq!(text.matches("prevent_sleep = ").count(), 1);
+        assert!(!parse(&text).unwrap().prevent_sleep);
+
+        put_prevent_sleep(&mut doc, true);
+        let again = regenerate(Some(&doc.to_string())).unwrap().to_string();
+        assert!(parse(&again).unwrap().prevent_sleep);
     }
 
     fn device(code: &str) -> crate::devices::Device {

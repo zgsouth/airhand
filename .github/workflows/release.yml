@@ -1,0 +1,527 @@
+# 发布：推送 vX.Y.Z 或 vX.Y.Z-rc.N 的 tag 时编译所有平台，发布到 GitHub Releases。
+#
+#   git tag -a v0.4.0-rc.1 -m "版本 0.4.0-rc.1" && git push origin v0.4.0-rc.1   → Pre-release
+#   git tag -a v0.4.0      -m "版本 0.4.0"      && git push origin v0.4.0        → 正式版（标为 Latest）
+#
+# 版本号以 tag 为准：编译前用 .github/scripts/set-version.mjs 写进各端的清单文件（不提交）。
+# Android 的 versionCode 由版本号算出（0.4.0-rc.1 → 40001，0.4.0 → 40099，见 android/app/build.gradle.kts）。
+#
+# 需要在仓库 Settings → Secrets and variables → Actions 里配置：
+#   Variables（必需）：AIRHAND_SERVER     中转服务器地址，如 relay.example.com:4433
+#                      AIRHAND_SERVER_FP  服务器证书的 SHA-256 指纹（64 位十六进制）
+#   Secrets（可选，Android 发布签名；不配置时用一次性的调试密钥签名，装不上覆盖旧版本）：
+#                      ANDROID_KEYSTORE_BASE64    keystore 文件的 base64（base64 -w0 release.jks）
+#                      ANDROID_KEYSTORE_PASSWORD  keystore 密码
+#                      ANDROID_KEY_ALIAS          密钥别名
+#                      ANDROID_KEY_PASSWORD       密钥密码（和 keystore 密码相同可以不填）
+#
+# 发布的文件（V = 版本号，如 0.4.0-rc.1）：
+#   Airhand_V_windows-x64-setup.exe      Windows 安装包（NSIS）
+#   Airhand_V_macos-arm64.dmg            macOS Apple 芯片
+#   Airhand_V_macos-x64.dmg              macOS Intel
+#   Airhand_V_linux-x64.deb              Linux x64
+#   Airhand_V_linux-arm64.deb            Linux arm64
+#   Airhand_V_android.apk                Android（arm64-v8a / armeabi-v7a / x86_64）
+#   Airhand_V_ios-unsigned.ipa           iOS / iPadOS（未正式签名）
+#   airhand-server_V_linux-x64.tar.gz    中转服务器
+#   airhand-server_V_linux-arm64.tar.gz
+#   airhand-server_V_windows-x64.zip
+#   SHA256SUMS.txt
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AIRHAND_SERVER: ${{ vars.AIRHAND_SERVER }}
+  AIRHAND_SERVER_FP: ${{ vars.AIRHAND_SERVER_FP }}
+  CARGO_TERM_COLOR: always
+  # macOS / iOS 用的 Xcode（xcode-27 机器上装着的版本之一），和开发时用的一致
+  XCODE_VERSION: "27.2"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Parse tag, check variables
+        id: meta
+        run: |
+          tag="$GITHUB_REF_NAME"
+          # 只认 rc：Android 的 versionCode 按这个规则算（android/app/build.gradle.kts）
+          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::Tag $tag is not vX.Y.Z or vX.Y.Z-rc.N (e.g. v0.4.0, v0.4.0-rc.1)"
+            exit 1
+          fi
+          version="${tag#v}"
+          base="${BASH_REMATCH[1]}"
+          if [ -n "${BASH_REMATCH[2]}" ]; then prerelease=true; else prerelease=false; fi
+
+          if [ -z "$AIRHAND_SERVER" ]; then
+            echo "::error::Repository variable AIRHAND_SERVER is not set (Settings → Secrets and variables → Actions → Variables)"
+            exit 1
+          fi
+          # 与客户端编译时的检查相同：64 位十六进制，允许 ':' 和空白
+          fp_digits="$(printf '%s' "$AIRHAND_SERVER_FP" | tr -d ' :\t\r\n')"
+          if [[ ! "$fp_digits" =~ ^[0-9A-Fa-f]{64}$ ]]; then
+            echo "::error::Repository variable AIRHAND_SERVER_FP must be the server certificate's SHA-256 fingerprint (64 hex digits)"
+            exit 1
+          fi
+
+          src="$(node -p 'require("./client/src-tauri/tauri.conf.json").version')"
+          if [ "$src" != "$version" ] && [ "$src" != "$base" ]; then
+            echo "::warning::The source still says version $src; this release is built as $version (taken from the tag)"
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Airhand $version"
+            echo "- Pre-release: $prerelease"
+            echo "- Server: \`$AIRHAND_SERVER\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ───────────── 桌面客户端 ─────────────
+
+  windows:
+    name: Windows x64
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # OpenH264 的 x86 汇编优化（软件编码回退时用）；装不上只是少了汇编，不影响构建
+      - name: Install NASM
+        run: |
+          if choco install nasm -y --no-progress; then
+            echo 'C:\Program Files\NASM' >> "$GITHUB_PATH"
+          else
+            echo "::warning::NASM is unavailable: OpenH264 is built without assembly"
+          fi
+
+      - name: Set version
+        run: node .github/scripts/set-version.mjs "$VERSION"
+
+      - name: Build
+        working-directory: client
+        run: |
+          npm ci --no-audit --no-fund
+          npx tauri build
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          cp client/src-tauri/target/release/bundle/nsis/*-setup.exe "dist/Airhand_${VERSION}_windows-x64-setup.exe"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # 在 Debian 12 里编译（glibc 2.36、PipeWire 0.3.65）：装得上 Debian 12+、Ubuntu 24.04+。
+    # Ubuntu 22.04 的 PipeWire 是 0.3.48，低于要求的 0.3.49，本来就不支持
+    container: debian:bookworm
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git file build-essential cmake pkg-config nasm \
+            libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libpulse-dev libpipewire-0.3-dev
+
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Set version
+        run: node .github/scripts/set-version.mjs "$VERSION"
+
+      - name: Build
+        working-directory: client
+        run: |
+          npm ci --no-audit --no-fund
+          npx tauri build
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          cp client/src-tauri/target/release/bundle/deb/*.deb "dist/Airhand_${VERSION}_linux-${{ matrix.arch }}.deb"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x64
+            target: x86_64-apple-darwin
+    # Xcode 27 只有 Apple 芯片的机器：Intel 版在上面交叉编译。Xcode 27 的 SDK 仍然能编 x86_64（部署目标低于
+    # macOS 27 即可，这里是 13）；C 依赖由 cc / cmake 按 --target 编（cmake-rs 会设 CMAKE_OSX_ARCHITECTURES）
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app"
+          xcodebuild -version
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Set version
+        run: node .github/scripts/set-version.mjs "$VERSION"
+
+      # CI=true 时 Tauri 打 dmg 跳过 Finder 排版（CI 里没有图形会话）
+      - name: Build
+        working-directory: client
+        run: |
+          npm ci --no-audit --no-fund
+          npx tauri build --target ${{ matrix.target }}
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          cp client/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg "dist/Airhand_${VERSION}_macos-${{ matrix.arch }}.dmg"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ───────────── 手机 ─────────────
+
+  android:
+    name: Android
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Install Android SDK packages
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" > /dev/null
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Set version
+        run: node .github/scripts/set-version.mjs "$VERSION"
+
+      - name: Signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "AIRHAND_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Secret ANDROID_KEYSTORE_BASE64 is not set: the APK is signed with a throwaway debug key and can't be installed over earlier releases"
+          fi
+
+      - name: Build
+        working-directory: android
+        env:
+          AIRHAND_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          AIRHAND_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          AIRHAND_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        # Kotlin 在 Gradle 进程里编译：不另开 Kotlin 守护进程（CI 只构建一次，用不上），也就没有它启动时的误报
+        # “e: The daemon has terminated unexpectedly ... Kotlin compile daemon is ready”
+        run: ./gradlew assembleRelease -Pkotlin.compiler.execution.strategy=in-process
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/*.apk "dist/Airhand_${VERSION}_android.apk"
+          rm -f "$RUNNER_TEMP/release.jks"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android
+          path: dist/*
+          if-no-files-found: error
+
+  ios:
+    name: iOS
+    needs: prepare
+    # 代码用到了新 SDK 的接口（如 allowBluetoothHFP），macos-15 默认的 Xcode 16.4 编不过；和开发时一样用 Xcode 27
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app"
+          xcodebuild -version
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Set version
+        run: node .github/scripts/set-version.mjs "$VERSION"
+
+      # 不设 TEAM_ID：ad-hoc 签名、带 App Group 权限的 IPA，安装前要重新签名（见 docs/ios.md）
+      - name: Build
+        run: ios/scripts/build-ipa.sh
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          cp ios/build/Airhand.ipa "dist/Airhand_${VERSION}_ios-unsigned.ipa"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ios
+          path: dist/*
+          if-no-files-found: error
+
+  # ───────────── 中转服务器 ─────────────
+
+  server-linux:
+    name: Server linux-${{ matrix.arch }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # 在 Ubuntu 20.04 里编译（glibc 2.31）：能在 Ubuntu 20.04+、Debian 11+、RHEL 9+ 上运行
+    container: ubuntu:20.04
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git build-essential
+
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release -p airhand-server
+
+      - name: Package
+        run: |
+          name="airhand-server_${VERSION}_linux-${{ matrix.arch }}"
+          mkdir -p "pkg/$name" dist
+          cp target/release/airhand-server LICENSE "pkg/$name/"
+          tar -C pkg -czf "dist/$name.tar.gz" "$name"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: server-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  server-windows:
+    name: Server windows-x64
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      # 静态链接 C 运行时：没装 VC++ 运行库的 Windows Server 上也能直接运行
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release -p airhand-server
+
+      - name: Package
+        run: |
+          name="airhand-server_${VERSION}_windows-x64"
+          mkdir -p "pkg/$name" dist
+          cp target/release/airhand-server.exe LICENSE "pkg/$name/"
+          (cd pkg && 7z a -tzip "../dist/$name.zip" "$name" > /dev/null)
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: server-windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+  # ───────────── 发布 ─────────────
+
+  release:
+    name: Publish
+    needs: [prepare, windows, linux, macos, android, ios, server-linux, server-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Release notes
+        run: |
+          v="$VERSION"
+          url="https://github.com/$GH_REPO/releases/download/$TAG"
+          link() { echo "[$1]($url/$1)"; }
+          cat > notes.md <<EOF
+          ## Downloads
+
+          | Platform | File |
+          |---|---|
+          | Windows 10 / 11 (x64) | $(link "Airhand_${v}_windows-x64-setup.exe") |
+          | macOS 13+ (Apple silicon) | $(link "Airhand_${v}_macos-arm64.dmg") |
+          | macOS 13+ (Intel) | $(link "Airhand_${v}_macos-x64.dmg") |
+          | Linux x64 (Debian 12+ / Ubuntu 24.04+) | $(link "Airhand_${v}_linux-x64.deb") |
+          | Linux arm64 (Debian 12+ / Ubuntu 24.04+) | $(link "Airhand_${v}_linux-arm64.deb") |
+          | Android 7+ (phones, tablets, Android TV / Google TV) | $(link "Airhand_${v}_android.apk") |
+          | iOS / iPadOS 17+ (unsigned) | $(link "Airhand_${v}_ios-unsigned.ipa") |
+          | Relay server, Linux x64 | $(link "airhand-server_${v}_linux-x64.tar.gz") |
+          | Relay server, Linux arm64 | $(link "airhand-server_${v}_linux-arm64.tar.gz") |
+          | Relay server, Windows x64 | $(link "airhand-server_${v}_windows-x64.zip") |
+
+          - **macOS**: ad-hoc signed, not notarized, so macOS refuses to open it ("damaged" / "can't be verified"). After dragging Airhand into Applications, run this once in Terminal: \`xattr -dr com.apple.quarantine /Applications/Airhand.app\`
+          - **Android TV / Google TV**: the same APK; sideload it (e.g. \`adb install\`) and it shows up in the TV's launcher. View only, operated entirely with the remote
+          - **Linux**: \`sudo apt install ./Airhand_${v}_linux-x64.deb\` (pulls in the tray, audio and GStreamer dependencies)
+          - **iOS**: the IPA has no real signature; re-sign it (Sideloadly, AltStore or your own certificate) before installing
+          - **Relay server**: keeps its certificate and database in \`data/\` next to the program; see [Deployment](https://github.com/$GH_REPO/blob/$TAG/docs/deploy.md#relay-server). The Linux builds need glibc 2.31+
+          - Checksums: $(link SHA256SUMS.txt)
+
+          EOF
+          cat notes.md
+
+      # 先建草稿、传完文件再公开，订阅者不会看到缺文件的 Release；重新运行时覆盖已有的文件
+      - name: Publish
+        run: |
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            pre=()
+            [ "$PRERELEASE" = true ] && pre=(--prerelease)
+            gh release create "$TAG" --draft --verify-tag --title "Airhand $TAG" \
+              --notes-file notes.md --generate-notes "${pre[@]}"
+          fi
+          gh release upload "$TAG" dist/* --clobber
+          if [ "$PRERELEASE" = true ]; then latest=false; else latest=true; fi
+          gh release edit "$TAG" --draft=false --prerelease="$PRERELEASE" --latest="$latest"

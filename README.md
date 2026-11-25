@@ -13,7 +13,7 @@ Airhand is a **high-performance, low-latency** remote desktop: the screen is enc
 The same program is both the **host** (the device being controlled) and the **controller** (the device you control it from). The two sides meet through a **relay server** that you deploy yourself. It's small, and Docker Compose deploys it with one command. Enter the other side's 6-digit **control code** to connect.
 
 > [!NOTE]
-> **Work in progress (0.3.1).** Build the relay, clients and web service from the same v10 revision; earlier builds cannot be mixed. Video uses one QUIC stream per frame. [Protocol versions](docs/development.md#protocol-versions)
+> **Work in progress (0.4.0).** Build the relay, clients and web service from the same v10 revision; earlier builds cannot be mixed. Video uses one QUIC stream per frame. [Protocol versions](docs/development.md#protocol-versions)
 
 ## Performance
 
@@ -34,6 +34,8 @@ See [How it works → Video](docs/architecture.md#video) for details.
 ## Features
 
 - **Windows system service**: the lock screen, the sign-in screen and UAC prompts can be seen and controlled, and the computer can be reached after boot, before anyone signs in
+- **Works with the monitor off** (Windows): when the host's monitor is switched off (or there's none), a virtual display fills in automatically; while a controller is connected the screen doesn't turn off and the computer doesn't sleep. On a Mac the same goes for a closed laptop lid (on a power adapter) or a Mac mini with no display
+- **Privacy mode** (Windows, macOS): with one click the remote computer's monitors all go blank and its keyboard and mouse stop working, so only you can see and control it; it ends by itself after you disconnect, with the remote screen locked first
 - **Fixed control codes**: they survive restarts, upgrades and even server restarts until you change them yourself
 - **Console**: browser-style tabs to control several computers at once, plus a multi-screen overview to watch them all. Computers you've connected to are saved and reconnect with one click; if one is offline, it connects as soon as it comes back
 - **Web console**: the controller can also run in Docker and be used from a browser, with nothing to install on the computer you control from
@@ -42,7 +44,7 @@ See [How it works → Video](docs/architecture.md#video) for details.
 - **Audio**: the host's system audio plays on the controller (Opus + adaptive jitter buffer), with optional A/V sync for watching videos. The other way, the controller can send its microphone to meeting apps and voice typing on Windows, macOS 14.2+ and Linux (PipeWire) hosts. Mac and Linux hosts publish **Airhand Microphone** while forwarding is on
 - **Handy tools**: two-way clipboard sync (text, plus files and folders, sent when you paste), typing the clipboard as keystrokes, system shortcuts (Win, Alt+Tab, Ctrl+Shift+Esc…), multiple monitors (switch between them, show and control several at once, or give each its own window to put on your own screens in full screen), keyboard lock in fullscreen, quality presets
 - **Secure by default**: sessions are end-to-end encrypted, so the relay server can't see the screen or keystrokes; the first connection needs the pairing code from the other computer's tray (it never goes through the server), and its identity is recognized afterwards; TLS 1.3 with certificate pinning, brute-force protection for control codes; the host always sees who is connected and can disconnect them with one click
-- **Leaves nothing behind**: the host is just a tray icon and doesn't start a WebView; everything worth keeping is in one `config.toml`, other runtime files are deleted on exit, and nothing is left after [uninstalling](docs/usage.md#uninstalling) (Windows has an uninstaller, macOS has "Uninstall Airhand…" in the menu, Linux takes two commands)
+- **Leaves nothing behind**: the host is just a tray icon and doesn't start a WebView; everything worth keeping is in one `config.toml`, other runtime files are deleted on exit, and nothing is left after [uninstalling](docs/usage.md#uninstalling) (Windows has an uninstaller, where you choose whether the virtual display driver goes too; macOS has "Uninstall Airhand…" in the menu, Linux takes two commands)
 - **English and Chinese**: follows the system language; notices from the other computer and the server also appear in **your** language
 
 ## Platforms

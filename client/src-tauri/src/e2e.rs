@@ -26,7 +26,7 @@ use airhand_proto::{MAX_SIGNAL_MSG, Role};
 
 use airhand_link::ServerState;
 
-use crate::host::HostService;
+use crate::host::{HostCode, HostService};
 use crate::status;
 
 /// 控制通道（或者大块通道）的发送端：加密之后写进去
@@ -104,7 +104,7 @@ async fn open_session(
     req_id: u32,
 ) -> Established {
     let me = Identity::generate();
-    let intro = secure::controller_intro("e2e", "test", settings, audio, Vec::new());
+    let intro = secure::controller_intro("e2e", "test", settings, audio, Vec::new(), false);
     let (initiator, init) = secure::initiate(InitiatorParams {
         code,
         me: &me,
@@ -155,7 +155,7 @@ async fn e2e_roundtrip() {
         .with_env_filter("info,quinn=warn")
         .try_init();
     let hub = status::new_hub();
-    let _host = HostService::start(hub.clone());
+    let _host = HostService::start(hub.clone(), HostCode::default());
     let (code, pairing) = wait_host(&hub).await;
     println!("被控端控制码: {code}，配对码: {pairing:?}");
 
@@ -432,6 +432,8 @@ async fn e2e_roundtrip() {
                 println!("麦克风: {state:?} {detail:?}");
                 rep.mic = Some(state);
             }
+            // 防窥模式（装了虚拟显示器驱动的 Windows、有辅助功能权限的 macOS 被控端能开）：这个测试不开
+            HostMsg::Privacy { state, detail } => println!("防窥模式: {state:?} {detail:?}"),
             HostMsg::Notice(notice) => {
                 println!("提示: {notice:?}");
                 match notice.expect("同一个版本的提示都认识") {
@@ -553,7 +555,7 @@ async fn e2e_multi_display() {
         .with_env_filter("info,quinn=warn")
         .try_init();
     let hub = status::new_hub();
-    let _host = HostService::start(hub.clone());
+    let _host = HostService::start(hub.clone(), HostCode::default());
     let (code, pairing) = wait_host(&hub).await;
     let mut sig = airhand_link::net::connect_signal(&crate::config::link(), Role::Controller, None)
         .await
@@ -735,7 +737,7 @@ async fn e2e_mic() {
         .with_env_filter("info,quinn=warn,airhand_lib::host::mic=debug")
         .try_init();
     let hub = status::new_hub();
-    let _host = HostService::start(hub.clone());
+    let _host = HostService::start(hub.clone(), HostCode::default());
     let (code, pairing) = wait_host(&hub).await;
     let mut sig = airhand_link::net::connect_signal(&crate::config::link(), Role::Controller, None)
         .await
@@ -895,7 +897,18 @@ async fn e2e_mic() {
     let _ = ctl.send.finish();
 }
 
-/// 服务器重启后，被控端应自动重连并取回原控制码。会自行启动/重启服务器进程。
+/// 被控端停下再启动（macOS / Linux 打开控制台、再关掉，见 `switch_services`）：和托盘一样用同一个 [`HostCode`]。
+/// 返回新的被控端、它的状态和它领到的控制码
+async fn restart_host(host: HostService, code: &HostCode) -> (HostService, status::StatusHub, u32) {
+    drop(host);
+    let hub = status::new_hub();
+    let host = HostService::start(hub.clone(), code.clone());
+    let got = wait_code(&hub).await;
+    (host, hub, got)
+}
+
+/// 服务器重启、被控端停下再启动之后，被控端都应取回原控制码；更换控制码之后取回的是新的，换掉的旧码不会回来。
+/// 会自行启动/重启服务器进程。
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn e2e_reconnect_keeps_code() {
@@ -917,10 +930,16 @@ async fn e2e_reconnect_keeps_code() {
             .expect("启动服务器（先 cargo build -p airhand-server）")
     };
     let mut server = spawn();
+    let host_code = HostCode::default();
     let hub = status::new_hub();
-    let _host = HostService::start(hub.clone());
+    let host = HostService::start(hub.clone(), host_code.clone());
     let code = wait_code(&hub).await;
     println!("初始控制码 {code}");
+
+    // 刚领到控制码就停下再启动（刚装好时打开、关掉控制台）：不能再领一个新的
+    let (host, hub, again) = restart_host(host, &host_code).await;
+    println!("被控端停下再启动，控制码 {again}");
+    assert_eq!(code, again, "被控端停下再启动后控制码应保持不变");
 
     server.kill().unwrap();
     let _ = server.wait();
@@ -946,7 +965,7 @@ async fn e2e_reconnect_keeps_code() {
     assert_eq!(code, code2, "重连后控制码应保持不变");
 
     // 托盘"更换控制码"
-    _host.send(crate::host::HostCmd::NewCode);
+    host.send(crate::host::HostCmd::NewCode);
     let t = Instant::now();
     let code3 = loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -962,6 +981,11 @@ async fn e2e_reconnect_keeps_code() {
         "已更换控制码 {code2} -> {code3}，用时 {:.1}s",
         t.elapsed().as_secs_f32()
     );
+
+    // 更换之后停下再启动：接着用新的控制码，换掉的旧码不会回来
+    let (_host, _hub, code4) = restart_host(host, &host_code).await;
+    println!("更换控制码之后被控端停下再启动，控制码 {code4}");
+    assert_eq!(code3, code4, "更换控制码之后停下再启动，应保持新的控制码");
     server.kill().unwrap();
     let _ = server.wait();
 }

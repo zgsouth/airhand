@@ -67,6 +67,7 @@ npm run tauri build
 ### Windows 说明
 
 - 安装程序可以为所有用户安装并注册系统服务，也可以仅为当前用户安装（见 [Windows 安装版](usage.zh-CN.md#windows-安装版)），附加步骤在 `client/src-tauri/windows/hooks.nsh`
+- 虚拟显示器驱动（MttVDD，见[虚拟显示器](usage.zh-CN.md#虚拟显示器)）在 `client/src-tauri/windows/vdd/` 里，打包时放进安装目录的 `vdd\`（`tauri.windows.conf.json` 的 `resources`）。这几个文件原样取自它的发布包、带着签名，不要改；更新方法见那里的 `README.md`
 - `npm run tauri build -- --no-bundle` 只生成 `airhand.exe`，但发布版没有安装时不能运行
 - C 运行时是静态链接的，不需要装 VC++ 运行库
 - Media Foundation 是延迟加载的，Windows N 版（没装媒体功能包）也能运行，会改用软件编码
@@ -74,7 +75,7 @@ npm run tauri build
 ### macOS 说明
 
 - 只要 .app 时用 `npm run tauri build -- --bundles app`；构建的是本机的架构（Apple 芯片是 arm64）
-- 程序只做了临时签名（ad-hoc），没有经过 Apple 公证：拷到别的 Mac 上第一次打开时，在访达里右键 → 打开（或者 `xattr -dr com.apple.quarantine Airhand.app`）
+- 程序只做了临时签名（ad-hoc），没有经过 Apple 公证：下载或隔空投送到别的 Mac 上会打不开（提示“已损坏”或“无法验证”，在访达里右键 → 打开也没用），要先执行一次 `xattr -dr com.apple.quarantine /Applications/Airhand.app`
 - 系统按签名记住授予的权限，而临时签名每次构建都会变：重新构建后要在“系统设置 → 隐私与安全性”里把 Airhand 删掉再重新授权。长期使用的话，在 `client/src-tauri/tauri.macos.conf.json` 里把 `signingIdentity` 换成自己的开发者证书
 - 打包时默认开启 Hardened Runtime，权利（entitlements）写在 `client/src-tauri/Entitlements.plist` 里。少了 `com.apple.security.device.audio-input` 的话，系统会直接拒绝麦克风，也不弹授权框
 

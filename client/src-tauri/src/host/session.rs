@@ -5,6 +5,10 @@
 //! 控制端可以同时看好几个显示器（见 `airhand_proto::session` 的"多屏"）：每一路画面一条编码管线（[`Pipeline`]），
 //! 各自的在途控制和码率（[`Flows`]）；采集按显示器和别的会话共用（见 [`capture`]），光标整个会话一份
 //! （[`SharedCursor`]）。鼠标的绝对坐标按它说的那一路画面的显示器换算。
+//!
+//! 会话期间不熄屏、不睡眠（[`power`]）；本机的显示器关了电源时补一块虚拟显示器、防窥模式都在
+//! [`virtual_display`]：它改了显示设置就告诉会话，会话马上重新列出显示器（画面跟着换到虚拟显示器上、换回来）。
+//! 会话怎么结束的（正常结束还是出了错）交给 [`ending`]：远程控制结束了就锁屏、退出防窥模式。
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,10 +29,13 @@ use tracing::{info, warn};
 use super::audio::{self, AudioSubscription};
 use super::capture;
 use super::cursor::SharedCursor;
+use super::ending;
 use super::gate::DesktopGate;
 use super::input::InjectorThread;
 use super::mic::{self, MicInput, MicLease};
 use super::pipeline::{self, Pipeline};
+use super::power::{self, Awake};
+use super::virtual_display::{self, Lease, Privacy};
 use crate::clipboard::{self, ClipSync};
 use crate::config;
 use airhand_link::controller::Clip;
@@ -49,18 +56,39 @@ const PERMISSION_CHECK: Duration = Duration::from_secs(2);
 const DISPLAY_CHECK: Duration = Duration::from_secs(2);
 /// 没有虚拟麦克风（或者打不开）时隔多久再找一次，例如对方刚装好 Steam
 const MIC_CHECK: Duration = Duration::from_secs(5);
+/// macOS：会话开始时列不出显示器（睡着了）的话，叫醒它之后最多等这么久
+const WAKE_WAIT: Duration = Duration::from_secs(3);
 
 /// 显示器列表变了之后，每一路画面看的显示器在新列表里的序号：按名字找（插拔别的显示器时序号可能变），
 /// 找不到（被拔掉了）的那一路不要了；一路都不剩就改看主显示器（新列表的第一个，见 [`resolve_view`]）。
-fn follow_view(old: &[DisplayInfo], view: &[StreamView], new: &[DisplayInfo]) -> Vec<StreamView> {
+///
+/// `fill_in`：补屏的虚拟显示器（见 [`virtual_display::filling_in`]）。本机的显示器回到桌面上了，它马上就要停用：
+/// 看着它的那一路也不要了，一路都不剩时改看本机的显示器（主显示器排在前面）。不然先跟着它，它停用时再换一次，
+/// 控制端的画面多跳一下
+fn follow_view(
+    old: &[DisplayInfo],
+    view: &[StreamView],
+    new: &[DisplayInfo],
+    fill_in: Option<&str>,
+) -> Vec<StreamView> {
+    let leaving = fill_in.filter(|v| new.iter().any(|d| d.name != *v));
     let followed: Vec<StreamView> = view
         .iter()
         .filter_map(|v| {
             let name = &old.get(v.display as usize)?.name;
+            if leaving == Some(name.as_str()) {
+                return None;
+            }
             let display = new.iter().position(|n| &n.name == name)? as u8;
             Some(StreamView { display, ..*v })
         })
         .collect();
+    if followed.is_empty()
+        && let Some(v) = leaving
+        && let Some(i) = new.iter().position(|d| d.name != v)
+    {
+        return vec![StreamView::display(i as u8)];
+    }
     resolve_view(&followed, new.len(), MAX_STREAMS)
 }
 
@@ -109,23 +137,44 @@ fn ticker(period: Duration) -> Interval {
     t
 }
 
+/// 等显示器出来（虚拟显示器补上、睡着的显示器亮起来），最多 `wait`：列出的显示器，等不到就是空的
+async fn wait_for_displays(wait: Duration) -> Vec<DisplayInfo> {
+    let deadline = tokio::time::Instant::now() + wait;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let now = tokio::task::spawn_blocking(capture::displays)
+            .await
+            .unwrap_or_default();
+        if !now.is_empty() {
+            return now;
+        }
+    }
+    Vec::new()
+}
+
 pub async fn run(inc: Incoming, gate: Arc<DesktopGate>) -> Result<()> {
     let session_id = inc.session_id;
     let ip = inc.peer.ip;
+    let presence = ending::Slot::default();
+    let slot = presence.clone();
     // 端到端握手：没配对过、又没有配对码的控制端，在这里就被拒绝了（见 gate）。
     // 握手通过就开始采集（不等控制端的确认，省一个往返），确认了才在托盘里显示它（见 Platform::confirmed）
-    serve(
+    let result = serve(
         inc,
         &*gate,
         VIDEO_QUEUE,
         audio::QUEUE,
         |admitted, senders| {
-            let mut desktop = Desktop::new(session_id, senders);
+            let mut desktop = Desktop::new(session_id, senders, slot);
             desktop.identity = Some((gate.clone(), ip, admitted.clone()));
             desktop
         },
     )
-    .await
+    .await;
+    // 控制端断开了、本机断开了它（`Ok`）：远程控制马上算结束；失联、连接出错：等它重连（见 ending）。
+    // 任务在这之前被中止了的（与服务器的连接断了）也算出错
+    presence.end(result.is_ok());
+    result
 }
 
 /// 桌面版一个会话里的东西
@@ -164,6 +213,19 @@ struct Desktop {
     /// 缺少的系统权限（macOS），见 [`super::missing_permissions`]
     missing: (bool, bool),
     mic: Mic,
+    /// 虚拟显示器：补屏、防窥（见 [`virtual_display`]）
+    screens: Lease,
+    /// 防窥模式的状态变了、改过显示设置
+    privacy_changes: watch::Receiver<Privacy>,
+    display_changes: watch::Receiver<u64>,
+    /// 告诉过控制端的防窥状态（一样的不再发）
+    privacy_sent: Option<Privacy>,
+    /// 控制端在握手里要了防窥模式：确认了握手才打开（重放的握手消息不能让本机黑屏）
+    privacy_at_start: bool,
+    /// 会话期间不熄屏、不睡眠
+    _awake: Option<Awake>,
+    /// 控制端确认了握手就算一次远程控制，结束后锁屏、退出防窥（见 [`ending`]）
+    presence: ending::Slot,
 }
 
 /// 控制端的麦克风（见 [`super::mic`]）
@@ -215,10 +277,13 @@ enum Tick {
     Mic(mic::Status),
     /// 别的会话放开了麦克风，或者该再找一次设备了
     MicCheck,
+    /// 防窥模式的状态变了
+    Privacy,
 }
 
 impl Desktop {
-    fn new(session_id: u64, senders: Senders) -> Self {
+    fn new(session_id: u64, senders: Senders, presence: ending::Slot) -> Self {
+        let screens = virtual_display::join(session_id);
         Self {
             session_id,
             identity: None,
@@ -247,7 +312,30 @@ impl Desktop {
                 owner: mic::owner_changed(),
                 tick: ticker(MIC_CHECK),
             },
+            privacy_changes: screens.privacy_changes(),
+            display_changes: screens.display_changes(),
+            screens,
+            privacy_sent: None,
+            privacy_at_start: false,
+            _awake: None,
+            presence,
         }
+    }
+
+    /// 告诉控制端防窥模式现在怎么样（和上次说的一样就不说了；这个平台没有防窥模式就不说）
+    fn send_privacy(&mut self) -> Result<()> {
+        let Some(p) = self.screens.privacy() else {
+            return Ok(());
+        };
+        if self.privacy_sent.as_ref() == Some(&p) {
+            return Ok(());
+        }
+        self.out.send(&HostMsg::Privacy {
+            state: p.state,
+            detail: p.detail.clone(),
+        })?;
+        self.privacy_sent = Some(p);
+        Ok(())
     }
 
     /// 告诉控制端麦克风现在怎么样（和上次说的一样就不说了）
@@ -405,7 +493,15 @@ impl Platform for Desktop {
     }
 
     async fn start(&mut self, start: Start) -> Result<()> {
-        let (displays, codecs, env_notice) = tokio::task::spawn_blocking(|| {
+        // 不熄屏。屏幕已经熄了的话叫醒它（不然没有新画面）。Windows 要防窥的不叫：本机的显示器马上要撤下来；
+        // macOS 的防窥采集的还是本机的显示器（调黑了，见 virtual_display），睡着的采集不了，照样叫
+        self._awake = Some(power::keep_awake());
+        self.privacy_at_start = start.privacy;
+        let dark = start.privacy && cfg!(windows);
+        if !dark {
+            power::wake_display();
+        }
+        let (mut displays, codecs, env_notice) = tokio::task::spawn_blocking(|| {
             (
                 capture::displays(),
                 super::encoder::available_codecs(),
@@ -414,6 +510,21 @@ impl Platform for Desktop {
         })
         .await
         .unwrap_or_default();
+        if displays.is_empty() && self.screens.can_fill_in() {
+            // 本机的显示器关了电源（或者没接）：虚拟显示器马上补上，等它出来再开始，不先告诉控制端"没有显示器"
+            info!(
+                session_id = self.session_id,
+                "no displays, waiting for the virtual display"
+            );
+            displays = wait_for_displays(virtual_display::APPEAR_WAIT).await;
+        } else if displays.is_empty() && cfg!(target_os = "macos") {
+            // macOS：睡着的显示器可能列不出来（锁屏之后常见），上面刚叫醒它：等它亮起来，同样不先说"没有显示器"
+            info!(
+                session_id = self.session_id,
+                "no displays, waiting for the display to wake up"
+            );
+            displays = wait_for_displays(WAKE_WAIT).await;
+        }
         self.displays = displays;
         let view = resolve_view(&start.view, self.displays.len(), MAX_STREAMS);
         let (hostname, os) = crate::sysinfo::host_identity();
@@ -457,13 +568,19 @@ impl Platform for Desktop {
         }
         let status = mic::probe(self.session_id).await;
         self.send_mic(status)?;
+        self.send_privacy()?;
         Ok(())
     }
 
-    /// 控制端确认了握手：是真的在连（重放的握手消息走不到这里），这时才在托盘里显示它
+    /// 控制端确认了握手：是真的在连（重放的握手消息走不到这里），这时才在托盘里显示它、
+    /// 打开它在握手里要的防窥模式（断线重连时接着开着，见 [`virtual_display`]）
     fn confirmed(&mut self) {
         if let Some((gate, ip, admitted)) = self.identity.take() {
             gate.admitted(self.session_id, ip, &admitted);
+        }
+        self.presence.confirmed(self.session_id);
+        if self.privacy_at_start {
+            self.screens.set_privacy(true);
         }
     }
 
@@ -510,6 +627,12 @@ impl Platform for Desktop {
                     self.subscribe_audio()?;
                 }
             }
+            Request::Privacy(on) => {
+                // 请求都在控制端的确认之后，只是可能比 `confirmed` 先处理：打开防窥的会话一定要算数，
+                // 它结束了才会退出防窥（见 ending）
+                self.presence.confirmed(self.session_id);
+                self.screens.set_privacy(on);
+            }
             Request::Mic(enabled) => {
                 self.mic.wanted = enabled;
                 if enabled && self.mic.lease.is_none() {
@@ -536,6 +659,9 @@ impl Platform for Desktop {
             // 只关心别的会话放开了麦克风：自己打开、放开的时候不在等
             _ = self.mic.owner.changed(), if self.mic.waiting() => Tick::MicCheck,
             _ = self.mic.tick.tick(), if self.mic.missing() => Tick::MicCheck,
+            _ = self.privacy_changes.changed() => Tick::Privacy,
+            // 虚拟显示器改了显示设置：马上重新列出显示器，不等定时检查
+            _ = self.display_changes.changed() => Tick::Displays,
         }
     }
 
@@ -586,12 +712,14 @@ impl Platform for Desktop {
             // （例如把显示器转成竖屏后宽高对调）。更新列表并告诉控制端；采集线程自己会重新打开。
             // 正在看的显示器换了序号就跟着它走，被拔掉了就改看主显示器
             Tick::Displays => {
-                let now = tokio::task::spawn_blocking(capture::displays)
-                    .await
-                    .unwrap_or_default();
+                let (now, fill_in) = tokio::task::spawn_blocking(|| {
+                    (capture::displays(), virtual_display::filling_in())
+                })
+                .await
+                .unwrap_or_default();
                 // 列不出来（例如切换显示模式的瞬间）时保留原来的列表
                 if !now.is_empty() && now != self.displays {
-                    let next = follow_view(&self.displays, &self.view, &now);
+                    let next = follow_view(&self.displays, &self.view, &now, fill_in.as_deref());
                     info!(session_id, ?now, view = ?next, "displays changed");
                     self.displays = now;
                     // 序号没变的那几路接着编：采集线程自己会重新打开（旋转、改分辨率……）
@@ -601,6 +729,7 @@ impl Platform for Desktop {
                 }
             }
             Tick::Mic(status) => self.send_mic(status)?,
+            Tick::Privacy => self.send_privacy()?,
             // 能用了的话：控制端一直想开着就打开，不然告诉它现在能开了
             Tick::MicCheck => {
                 if self.mic.wanted {
@@ -669,15 +798,18 @@ mod tests {
             d(0, "DISPLAY1", 0, 1920, 1080),
             d(1, "DISPLAY2", 1920, 1080, 1920),
         ];
-        assert_eq!(follow_view(&old, &view(&[1]), &rotated), view(&[1]));
+        assert_eq!(follow_view(&old, &view(&[1]), &rotated, None), view(&[1]));
         // 在左边插了一个显示器，正在看的那个排到了后面；两个都在看时两路各跟各的
         let plugged = [
             d(0, "DISPLAY1", 0, 1920, 1080),
             d(1, "DISPLAY3", 1920, 1280, 1024),
             d(2, "DISPLAY2", 3200, 1920, 1080),
         ];
-        assert_eq!(follow_view(&old, &view(&[1]), &plugged), view(&[2]));
-        assert_eq!(follow_view(&old, &view(&[0, 1]), &plugged), view(&[0, 2]));
+        assert_eq!(follow_view(&old, &view(&[1]), &plugged, None), view(&[2]));
+        assert_eq!(
+            follow_view(&old, &view(&[0, 1]), &plugged, None),
+            view(&[0, 2])
+        );
         // 每一路的大小跟着它走
         let sized = [
             StreamView::display(0),
@@ -687,7 +819,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            follow_view(&old, &sized, &plugged),
+            follow_view(&old, &sized, &plugged, None),
             [
                 StreamView::display(0),
                 StreamView {
@@ -697,9 +829,43 @@ mod tests {
             ]
         );
         // 正在看的被拔掉了：只看它的时候改看主显示器，还看着别的显示器就不要这一路了
-        assert_eq!(follow_view(&old, &view(&[1]), &old[..1]), view(&[0]));
-        assert_eq!(follow_view(&old, &view(&[1, 0]), &old[..1]), view(&[0]));
+        assert_eq!(follow_view(&old, &view(&[1]), &old[..1], None), view(&[0]));
+        assert_eq!(
+            follow_view(&old, &view(&[1, 0]), &old[..1], None),
+            view(&[0])
+        );
         // 序号本来就不对
-        assert_eq!(follow_view(&old, &view(&[7]), &old), view(&[0]));
+        assert_eq!(follow_view(&old, &view(&[7]), &old, None), view(&[0]));
+    }
+
+    /// 补屏的时候本机的显示器回到了桌面上：不再跟着马上就要停用的虚拟显示器，改看本机的（不管谁排在前面）；
+    /// 只剩虚拟显示器的时候照常跟着它
+    #[test]
+    fn leaves_the_fill_in_display_when_a_monitor_is_back() {
+        let filling = [d(0, "DISPLAY19", 0, 3840, 2160)];
+        let back = [
+            d(0, "DISPLAY1", 0, 3840, 2160),
+            d(1, "DISPLAY19", 3840, 1920, 1080),
+        ];
+        assert_eq!(
+            follow_view(&filling, &view(&[0]), &back, Some("DISPLAY19")),
+            view(&[0])
+        );
+        let back_behind = [
+            d(0, "DISPLAY19", 0, 1920, 1080),
+            d(1, "DISPLAY1", 1920, 3840, 2160),
+        ];
+        assert_eq!(
+            follow_view(&filling, &view(&[0]), &back_behind, Some("DISPLAY19")),
+            view(&[1])
+        );
+        // 不知道哪个是补屏的：和以前一样跟着名字走
+        assert_eq!(follow_view(&filling, &view(&[0]), &back, None), view(&[1]));
+        // 分辨率变了，还是只有它
+        let resized = [d(0, "DISPLAY19", 0, 1920, 1080)];
+        assert_eq!(
+            follow_view(&filling, &view(&[0]), &resized, Some("DISPLAY19")),
+            view(&[0])
+        );
     }
 }

@@ -169,6 +169,21 @@ pub struct Broker {
     file_bytes: Arc<AtomicU64>,
 }
 
+/// 服务器现在的状况（[`Broker::stats`]）
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    /// 连着服务器的被控端（包括正在注册的、正在断开的）
+    pub hosts: usize,
+    /// 会话：从服务器批准连接请求，到任何一端的控制通道结束（画面走直连的也算）
+    pub sessions: usize,
+    /// 其中两端的控制通道还没都到的（正在建立，一直建立不起来的 20 秒后清掉）
+    pub starting: usize,
+    /// 固定的控制码：绑定给了保存控制码的被控端，不管它在不在线（见 [`crate::codes`]）
+    pub fixed: usize,
+    /// 作废了的控制码（被控端更换了控制码，见 [`crate::codes`]）
+    pub retired: usize,
+}
+
 async fn writer_loop(mut send: SendStream, mut rx: mpsc::Receiver<ServerMsg>) {
     while let Some(msg) = rx.recv().await {
         if write_msg(&mut send, &msg).await.is_err() {
@@ -220,7 +235,9 @@ impl Broker {
     async fn persisted(&self, barrier: Barrier) {
         if !barrier.wait(PERSIST_WAIT).await {
             warn!(
-                "fixed control codes: persistence barrier did not complete; keeping in-memory ownership"
+                "control code database: still not written after {} s, carrying on without waiting \
+                 (the change already applies, and is still being written)",
+                PERSIST_WAIT.as_secs()
             );
         }
     }
@@ -231,13 +248,22 @@ impl Broker {
         self.persisted(barrier).await;
     }
 
-    /// (在线的被控端, 会话, 固定的控制码)
-    pub fn stats(&self) -> (usize, usize, usize) {
-        // 一把一把地拿（写在一个元组表达式里的话，三把锁的守卫会一直活到表达式结束，同时拿着三把）
+    /// 服务器现在的状况（定时记进日志）
+    pub fn stats(&self) -> Stats {
+        // 一把一把地拿（写在一个表达式里的话，几把锁的守卫会一直活到表达式结束，同时拿着）
         let hosts = self.hosts.lock().len();
-        let sessions = self.sessions.lock().len();
-        let fixed = self.bindings.lock().len();
-        (hosts, sessions, fixed)
+        let (sessions, starting) = self.session_counts();
+        let (fixed, retired) = {
+            let bindings = self.bindings.lock();
+            (bindings.len(), bindings.retired_len())
+        };
+        Stats {
+            hosts,
+            sessions,
+            starting,
+            fixed,
+            retired,
+        }
     }
 
     /// 启动以来文件流（剪贴板里的文件）一共经中转转发了多少字节

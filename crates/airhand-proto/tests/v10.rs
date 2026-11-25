@@ -64,8 +64,22 @@ fn signal_and_handshake_layout() {
             settings: QualitySettings::default(),
             audio: true,
             view: vec![],
+            privacy: false,
         },
         "8601625043615785181e190fa0190438f500f580",
+    );
+    // 防窥模式：开着才写，数组多一项
+    golden(
+        ControllerIntro {
+            version: SESSION_VERSION,
+            name: "PC".into(),
+            os: "W".into(),
+            settings: QualitySettings::default(),
+            audio: true,
+            view: vec![],
+            privacy: true,
+        },
+        "8701625043615785181e190fa0190438f500f580f5",
     );
     golden(
         HostVerdict {
@@ -180,6 +194,21 @@ fn session_messages_layout() {
         );
     }
     golden(ControllerMsg::Mic { enabled: true }, "820a81f5");
+    golden(
+        HostMsg::Privacy {
+            state: PrivacyState::On,
+            detail: None,
+        },
+        "820e8104",
+    );
+    golden(
+        HostMsg::Privacy {
+            state: PrivacyState::Failed,
+            detail: Some("x".into()),
+        },
+        "820e82056178",
+    );
+    golden(ControllerMsg::Privacy { on: true }, "820d81f5");
 }
 
 #[test]

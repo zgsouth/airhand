@@ -4,9 +4,25 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// 产品版本与桌面客户端一致（client/src-tauri/tauri.conf.json）
-val appVersion = "0.3.1"
-val appVersionCode = 7
+// 产品版本与桌面客户端一致（client/src-tauri/tauri.conf.json）；发布时 CI 按 tag 改写（.github/scripts/set-version.mjs）
+val appVersion = "0.4.0"
+
+/**
+ * versionCode 由版本号算出：主版本 × 1000000 + 次版本 × 10000 + 修订号 × 100 + 后缀（rc.N → N，正式版 → 99）。
+ * 例：0.4.0-rc.1 → 40001，0.4.0 → 40099，0.4.1 → 40199。只增不减，rc 总比同版本的正式版小，
+ * 装了 rc 的设备可以直接升级到正式版；不用手动维护，同一个版本号算出来的总是同一个值
+ */
+val appVersionCode: Int = run {
+    val m = requireNotNull(Regex("""(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?""").matchEntire(appVersion)) {
+        "appVersion must be X.Y.Z or X.Y.Z-rc.N, got $appVersion"
+    }
+    val (major, minor, patch, rc) = m.destructured
+    val suffix = if (rc.isEmpty()) 99 else rc.toInt()
+    require(minor.toInt() <= 99 && patch.toInt() <= 99 && (rc.isEmpty() || suffix in 1..98)) {
+        "appVersion $appVersion is out of range for versionCode: minor and patch go up to 99, rc.N from 1 to 98"
+    }
+    major.toInt() * 1_000_000 + minor.toInt() * 10_000 + patch.toInt() * 100 + suffix
+}
 
 /** 构建参数：先找 Gradle 属性（-Pairhand.server=...），再找环境变量（AIRHAND_SERVER） */
 fun setting(prop: String, env: String): String? =
@@ -132,6 +148,8 @@ val cargoBuild by tasks.registering(Exec::class) {
     outputs.dir(outDir)
     doFirst {
         environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
+        // CI 的运行环境预先把 ANDROID_NDK_ROOT 设成它自带的 NDK：不一致的话 cargo-ndk 会警告（它用的是 ANDROID_NDK_HOME）
+        environment("ANDROID_NDK_ROOT", android.ndkDirectory.absolutePath)
     }
     val args = mutableListOf("cargo", "ndk")
     rustAbis.forEach { args += listOf("-t", it) }

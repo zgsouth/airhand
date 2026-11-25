@@ -181,6 +181,8 @@ const en: Record<MsgKey, Msg> = {
   "session.avSyncHint": "Video waits for the sound. Good for watching videos, but input feels slower",
   "session.mic": "Microphone",
   "session.micOn": "Microphone (sending to the remote computer)",
+  "session.privacy": "Privacy mode",
+  "session.privacyOn": "Privacy mode (the remote monitors are blank)",
   "session.mouse": "Mouse: {mode}",
   "session.mouseLocked": "The mouse is locked to the picture. Hold Esc to free it",
   "session.clickToLock": "Click the picture to lock the mouse",
@@ -254,6 +256,20 @@ const en: Record<MsgKey, Msg> = {
   "mic.local.denied": "Microphone access isn't allowed: allow it in your browser's site settings or your system's privacy settings",
   "mic.local.noDevice": "This computer has no microphone",
   "mic.local.failed": "Can't open this computer's microphone",
+
+  // Privacy mode: the remote monitors go blank and its keyboard and mouse stop working, only the controller sees and controls it
+  "privacy.toggle": "Privacy mode",
+  "privacy.off": "Blanks all of the remote computer's monitors and disables its keyboard and mouse, so only you can see and control it (the picture moves to a virtual display). Turns off by itself after you disconnect",
+  "privacy.starting": "Turning on: the remote computer is switching to a virtual display, this takes a few seconds",
+  "privacy.on": "On: the remote computer's monitors are blank and its keyboard and mouse don't work. Turns off 30 seconds after you disconnect (reconnecting in time keeps it on)",
+  "privacy.failed": "Couldn't turn it on ({detail}), the remote screen is back to normal. You can try again",
+  "privacy.unavailable": "Not available on the remote computer: Airhand has to be installed for all users, together with the virtual display driver",
+  "privacy.notAllowed": "The remote computer's settings don't allow privacy mode (privacy_mode in config.toml)",
+  "privacy.note": "Someone at the remote computer can end privacy mode by disconnecting it from the network or restarting it",
+  // The remote computer is a Mac: its displays are blanked and covered, no virtual display (see client/src-tauri/src/host/virtual_display/curtain.rs)
+  "privacy.offMac": "Blanks all of the remote Mac's displays and disables its keyboard, mouse and trackpad, so only you can see and control it. Turns off by itself after you disconnect",
+  "privacy.startingMac": "Turning on",
+  "privacy.unavailableMac": "Not available on the remote Mac: someone at that Mac has to allow Airhand in System Settings → Privacy & Security → Accessibility first (it's needed to block its keyboard and mouse)",
 
   "combo.winStart": "Start menu (Win)",
   "combo.altTab": "Switch windows (Alt + Tab)",

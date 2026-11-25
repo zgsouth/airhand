@@ -207,6 +207,8 @@ impl Platform for Phone {
             Request::Audio(false) => sh.audio.unsubscribe(self.id),
             // 手机不接控制端的麦克风：没有 Platform::mic，也不发 HostMsg::Mic，控制端不会显示麦克风
             Request::Mic(_) => {}
+            // 手机没有防窥模式：不发 HostMsg::Privacy，控制端不会显示这个开关
+            Request::Privacy(_) => {}
         }
         Ok(())
     }
@@ -285,6 +287,7 @@ mod tests {
                     settings: Default::default(),
                     audio: true,
                     view: Vec::new(),
+                    privacy: false,
                 })
                 .await
                 .unwrap();
@@ -357,6 +360,7 @@ mod tests {
                 settings: Default::default(),
                 audio: false,
                 view: Vec::new(),
+                privacy: false,
             },
         ));
         let lists = |host: &Host| -> Vec<serde_json::Value> {

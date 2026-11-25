@@ -277,9 +277,26 @@ pub fn subscribe(tx: mpsc::Sender<Bytes>) -> AudioSubscription {
     AudioSubscription::new(shared, id)
 }
 
-/// 打不开声音采集时要告诉控制端的原因；缺少系统权限时为 `None`（另有提示）。
+/// 没有显示器可以挂上声音采集（macOS：ScreenCaptureKit 的声音要挂在一个显示器上）。
+///
+/// 不算声音采集失败，不告诉控制端：画面那边已经说了"没有显示器"；合上盖子的那几秒、补屏的虚拟显示器出来之前
+/// （见 `virtual_display`）也会这样，过一会儿重试就好了，不该冒出"无法采集声音"的提示。
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct NoDisplay;
+
+impl std::fmt::Display for NoDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("no display to attach the audio capture to")
+    }
+}
+
+impl std::error::Error for NoDisplay {}
+
+/// 打不开声音采集时要告诉控制端的原因；缺少系统权限（另有提示）、没有显示器（见 [`NoDisplay`]）时为 `None`。
 fn failure_detail(e: &anyhow::Error) -> Option<String> {
-    (!super::missing_permission(e)).then(|| super::capture::wire_detail(e))
+    let quiet = super::missing_permission(e) || e.chain().any(|c| c.is::<NoDisplay>());
+    (!quiet).then(|| super::capture::wire_detail(e))
 }
 
 /// 更新采集状态，有变化才通知订阅者（每次重试失败的原因通常都一样）。
@@ -366,7 +383,7 @@ fn capture_loop(shared: Arc<Shared>) {
                     failures += 1;
                     set_failure(&shared, failure_detail(&e));
                     if failures == 1 || failures.is_multiple_of(30) {
-                        if super::missing_permission(&e) {
+                        if super::missing_permission(&e) || e.chain().any(|c| c.is::<NoDisplay>()) {
                             warn!("can't open audio capture: {e:#}");
                         } else {
                             warn!("can't open audio capture (no audio output device?): {e:#}");
@@ -595,13 +612,17 @@ mod tests {
         assert!(err.abs() < 3.0, "声音时间戳偏差 {err:.2} ms");
     }
 
-    /// 缺少系统权限不算采集失败（另有提示）；其它原因原样告诉控制端
+    /// 缺少系统权限、没有显示器不算采集失败（另有提示）；其它原因原样告诉控制端
     #[test]
     fn failure_details() {
         let e = anyhow::anyhow!("no default audio output device");
         assert_eq!(
             failure_detail(&e).as_deref(),
             Some("no default audio output device")
+        );
+        assert_eq!(
+            failure_detail(&anyhow::Error::from(NoDisplay).context("opening")),
+            None
         );
         #[cfg(target_os = "macos")]
         assert_eq!(

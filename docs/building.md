@@ -67,6 +67,7 @@ The output is under `client/src-tauri/target/release/`:
 ### Windows notes
 
 - The installer installs for all users and registers the system service, or installs just for the current user (see [Windows installation](usage.md#windows-installation)); its extra steps are in `client/src-tauri/windows/hooks.nsh`
+- The virtual display driver (MttVDD, see [Virtual display](usage.md#virtual-display)) is in `client/src-tauri/windows/vdd/` and is packaged into `vdd\` in the install directory (`resources` in `tauri.windows.conf.json`). The files are taken unchanged from its release and carry its signature, so don't edit them; the `README.md` there explains how to update them
 - `npm run tauri build -- --no-bundle` only builds `airhand.exe`, but a release build refuses to run until installed
 - The C runtime is statically linked, so the VC++ redistributable isn't needed
 - Media Foundation is delay-loaded, so Windows N editions (without the Media Feature Pack) still run and use software encoding
@@ -74,7 +75,7 @@ The output is under `client/src-tauri/target/release/`:
 ### macOS notes
 
 - For just the .app use `npm run tauri build -- --bundles app`; it is built for the machine's own architecture (arm64 on Apple silicon)
-- The app is only ad-hoc signed, not notarized: the first time you open a copy on another Mac, right-click it in Finder → Open (or run `xattr -dr com.apple.quarantine Airhand.app`)
+- The app is only ad-hoc signed, not notarized: a copy downloaded or AirDropped to another Mac won't open ("damaged" / "can't be verified"; right-click → Open doesn't help either), so run `xattr -dr com.apple.quarantine /Applications/Airhand.app` once first
 - macOS remembers granted permissions by code signature, and an ad-hoc signature changes with every build: after rebuilding, remove Airhand in System Settings → Privacy & Security and grant the permissions again. For long-term use, put your own Developer ID in `signingIdentity` in `client/src-tauri/tauri.macos.conf.json`
 - Bundles are signed with the Hardened Runtime, using the entitlements in `client/src-tauri/Entitlements.plist`. Without `com.apple.security.device.audio-input`, macOS denies the microphone silently, without asking
 

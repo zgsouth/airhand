@@ -24,7 +24,7 @@ use super::limits::{FAIL_LIMIT, SlotGuard, limiter_key, registration_key};
 use super::relay::Session;
 use super::tokens::{Secrets, ct_eq};
 use super::{Broker, SignalTx, close};
-use crate::codes::{Barrier, Owner};
+use crate::codes::{Barrier, Owner, RETIRED_HOLD};
 
 /// 被控端掉线后，控制码保留的时长（期间只有原设备能取回）。固定的控制码（`keep`）一直保留，见 [`crate::codes`]。
 pub(super) const RESERVE_TTL: Duration = Duration::from_secs(10 * 60);
@@ -38,7 +38,7 @@ pub(super) struct HostEntry {
     pub(super) ready: bool,
     secrets: Secrets,
     /// 被控端发过 [`ClientMsg::Release`]：断开后不再保留这个控制码
-    released: bool,
+    pub(super) released: bool,
     name: String,
     os: String,
     tx: SignalTx,
@@ -95,6 +95,26 @@ enum Denied {
 }
 
 impl Denied {
+    /// 记进日志的说法
+    fn describe(self) -> &'static str {
+        match self {
+            Denied::Unknown => {
+                "no host with this code is online (or it isn't ready yet); counted as a wrong guess"
+            }
+            Denied::Offline => {
+                "the host is offline; the controller has a reconnect token and waits for it to come back"
+            }
+            Denied::Revoked => {
+                "the controller's reconnect token isn't valid for this code (any more)"
+            }
+            Denied::Limited => "too many wrong codes from this network",
+            Denied::Flooding => {
+                "too many sessions requested to this host from this network in the last minute"
+            }
+            Denied::Busy => "the host already has as many sessions as it allows",
+        }
+    }
+
     fn error(self) -> ConnectError {
         match self {
             Denied::Unknown => ConnectError::NotFound,
@@ -181,11 +201,30 @@ impl Broker {
                         self.persisted(barrier).await;
                     }
                     self.announce(conn_id, got);
-                    info!(%peer, conn_id, code = got, keep, rekey, reclaimed = reclaim.is_some_and(|r| r.code == got), "host registered");
+                    let previous = reclaim.map(|r| r.code);
+                    let how = match previous {
+                        Some(p) if p == got => "took back its control code",
+                        Some(_) => {
+                            "its previous control code isn't available (changed, expired or not its own), got a new one"
+                        }
+                        None => "got a new control code",
+                    };
+                    // fixed：被控端保存控制码，服务器一直为它保留；rekey：顺便换一个密钥（见 ClientMsg::Register）
+                    info!(%peer, conn_id, code = got, ?previous, fixed = keep, rekey, "host registered: {how}");
                 }
                 (ClientMsg::Release, Some(c)) => {
-                    if self.release(conn_id, c) {
-                        info!(%peer, conn_id, code = c, "host released its control code");
+                    if let Some(barrier) = self.release(conn_id, c) {
+                        // 落盘之后再接着读：被控端等到连接断开才算放弃完了（见 airhand_link::host），
+                        // 之后服务器崩溃了，旧密钥也取不回这个控制码
+                        self.persisted(barrier).await;
+                        info!(
+                            %peer,
+                            conn_id,
+                            code = c,
+                            "host changed its control code: the old one is retired (nobody can take it back, \
+                             not handed out again for {} days)",
+                            RETIRED_HOLD.as_secs() / (24 * 3600)
+                        );
                     }
                 }
                 (ClientMsg::Rekey { secret }, Some(c)) => {
@@ -196,7 +235,7 @@ impl Broker {
                         self.persisted(barrier).await;
                     }
                     let _ = host.tx.send(ServerMsg::Rekeyed { secret });
-                    info!(%peer, conn_id, code = c, "host changed its secret, earlier reconnect tokens are void");
+                    info!(%peer, conn_id, code = c, "host disconnected all its controllers: gave it a new secret, earlier reconnect tokens no longer work");
                 }
                 (other, _) => warn!(%peer, "invalid message from host: {other:?}"),
             }
@@ -222,7 +261,12 @@ impl Broker {
         let mut chosen: Option<(u32, Secrets)> = None;
         if let Some(r) = reclaim.filter(|r| (CODE_MIN..=CODE_MAX).contains(&r.code)) {
             let owner = if let Some(old) = hosts.get(&r.code) {
-                old.secrets.owner(&r.secret)
+                // 放弃了、正在断开的：不还给任何人（绑定已经作废了，见 Broker::release）
+                if old.released {
+                    Owner::Other
+                } else {
+                    old.secrets.owner(&r.secret)
+                }
             } else if let Some(res) = reserved.get(&r.code).filter(|res| res.until > now) {
                 res.secrets.owner(&r.secret)
             } else {
@@ -261,9 +305,10 @@ impl Broker {
                 if self.new_codes.count(source) >= self.cfg.new_codes_per_ip {
                     return Err(Refused::Limited);
                 }
-                let free = |c: &u32| {
-                    !hosts.contains_key(c) && !reserved.contains_key(c) && !bindings.contains(*c)
-                };
+                // 作废了的控制码过了一段时间也可以分（见 crate::codes::RETIRED_HOLD）
+                let assignable = bindings.assignable();
+                let free =
+                    |c: &u32| !hosts.contains_key(c) && !reserved.contains_key(c) && assignable(*c);
                 let mut rng = rand::rng();
                 // 随机挑几次（平常第一次就是空闲的），挑不到再从随机位置开始逐个找
                 let code = (0..64)
@@ -287,6 +332,7 @@ impl Broker {
                 .then(|| bindings.barrier())
         } else {
             // 这个控制码是它的（取回的或者新分配的），它不再保存控制码了：解除绑定
+            //（分到的是作废过的控制码时，作废的记录也去掉：现在是它的了，它掉线之后要能取回）
             bindings.remove(code);
             None
         };
@@ -368,15 +414,16 @@ impl Broker {
         self.bindings.lock().touch(code);
     }
 
-    /// 被控端放弃控制码：解除绑定，断开后也不保留
-    fn release(&self, conn_id: u64, code: u32) -> bool {
+    /// 被控端放弃控制码（更换控制码）：作废（[`crate::codes::Bindings::retire`]），断开后也不保留。
+    /// 不管它保不保存控制码（`keep`）都作废：空闲的控制码出示本服务器签发过的密钥就能取回（见 [`Broker::register`]），
+    /// 拿着旧密钥的被控端不能再把换掉的控制码取回去。返回要等它落盘的屏障；`None`：不是这条连接的控制码
+    fn release(&self, conn_id: u64, code: u32) -> Option<Barrier> {
         let mut hosts = self.hosts.lock();
-        let Some(h) = hosts.get_mut(&code).filter(|h| h.conn_id == conn_id) else {
-            return false;
-        };
+        let h = hosts.get_mut(&code).filter(|h| h.conn_id == conn_id)?;
         h.released = true;
-        self.bindings.lock().remove(code);
-        true
+        let mut bindings = self.bindings.lock();
+        bindings.retire(code);
+        Some(bindings.barrier())
     }
 
     /// 被控端的用户断开了所有控制端：换一个密钥，之前发出的重连凭证随之作废。
@@ -460,7 +507,7 @@ impl Broker {
                         // 放慢猜码速度
                         tokio::time::sleep(Duration::from_millis(400)).await;
                     }
-                    info!(%peer, code, "connect request failed: {denied:?}");
+                    info!(%peer, code, "connect request refused: {}", denied.describe());
                 }
                 let result = result.map_err(Denied::error);
                 let _ = tx.send(ServerMsg::connect_result(req_id, result));

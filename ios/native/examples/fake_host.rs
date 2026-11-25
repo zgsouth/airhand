@@ -70,7 +70,7 @@ fn main() {
     let saved = Arc::new(Mutex::new(saved));
     let cfg: HostConfig = serde_json::from_value(serde_json::json!({
         "server": server, "fingerprint": "", "name": "Fake PC", "os": "Windows 11 (fake)",
-        "version": "0.3.1", "reclaim": saved.lock().unwrap().get("reclaim").cloned().unwrap_or_default(),
+        "version": "0.4.0", "reclaim": saved.lock().unwrap().get("reclaim").cloned().unwrap_or_default(),
         "pairing": saved.lock().unwrap().get("pairing").cloned().unwrap_or_default(),
         "identity": saved.lock().unwrap().get("identity").cloned().unwrap_or_default(),
         "displays": [{"index":0,"name":"Fake","x":0,"y":0,"width":w,"height":h,"primary":true}],

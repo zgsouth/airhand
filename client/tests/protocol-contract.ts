@@ -61,6 +61,11 @@ export const contract = {
       "sid": 3
     },
     {
+      "cmd": "privacy",
+      "on": true,
+      "sid": 3
+    },
+    {
       "cmd": "clipboard",
       "sid": 3,
       "text": "hi"
@@ -88,6 +93,7 @@ export const contract = {
     "audio": true,
     "hostKey": "abababababababababababababababababababababababababababababababab",
     "pairing": "482913",
+    "privacy": true,
     "resume": [
       1,
       2,

@@ -52,6 +52,12 @@
 //! 被控端用 [`SessionEvent::Mic`] 说明它能不能接麦克风。
 //! 界面打开麦克风（[`Command::Mic`]）之后自己采集、编码，把打好的声音包交给 [`ControllerService::mic`]：
 //! 这里带上之前几包的副本、加密，发成声音数据报（走画面来的那条路）。界面不知道有冗余、有几条路。
+//!
+//! # 防窥模式
+//!
+//! 被控端用 [`SessionEvent::Privacy`] 说明它能不能开、开着没有（见 `airhand_proto::session` 的"防窥模式"），
+//! 界面用 [`Command::Privacy`] 打开、关闭。断线重连时界面在连接选项里带上它（[`ConnectOptions::privacy`]）：
+//! 被控端一开始就保持着，本机屏幕不会在重连的间隙露出来。
 
 mod cursor;
 mod link;
@@ -210,6 +216,11 @@ pub enum Command {
         sid: u32,
         enabled: bool,
     },
+    /// 打开 / 关闭被控端的防窥模式（见模块说明的"防窥模式"）。被控端不支持时什么也不做
+    Privacy {
+        sid: u32,
+        on: bool,
+    },
     /// 把界面复制的文本发给被控端（网页版、Android：剪贴板由界面自己读）。走大块通道，网络慢、
     /// 前面还排着好几次没发完时丢掉这一次
     Clipboard {
@@ -250,6 +261,7 @@ impl Command {
             | Command::View { sid, .. }
             | Command::Audio { sid, .. }
             | Command::Mic { sid, .. }
+            | Command::Privacy { sid, .. }
             | Command::Clipboard { sid, .. }
             | Command::ClipboardSync { sid, .. }
             | Command::ClipboardCleared { sid }
@@ -285,6 +297,9 @@ pub struct ConnectOptions {
     /// 开始时看哪几个显示器（同上，见 [`Command::View`]）；空的是只看主显示器
     #[serde(default)]
     pub view: Vec<StreamView>,
+    /// 开始时要不要防窥模式（见模块说明的"防窥模式"）：重连时带上界面现在的开关
+    #[serde(default)]
+    pub privacy: bool,
 }
 
 #[derive(Clone)]
@@ -411,6 +426,7 @@ impl ControllerService {
             opts.settings,
             opts.audio,
             opts.view,
+            opts.privacy,
         );
         let (initiator, init) = secure::initiate(InitiatorParams {
             code,
@@ -600,6 +616,7 @@ impl ControllerService {
                 (sid, ControllerMsg::View { streams })
             }
             Command::Audio { sid, enabled } => (sid, ControllerMsg::Audio { enabled }),
+            Command::Privacy { sid, on } => (sid, ControllerMsg::Privacy { on }),
             Command::Mic { sid, enabled } => {
                 let sessions = self.inner.sessions.lock().unwrap();
                 let s = sessions.get(&sid).ok_or(Problem::NoSession)?;

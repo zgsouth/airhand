@@ -222,6 +222,10 @@ pub struct ControllerIntro {
     /// 开始时看哪几个显示器；空的是只看主显示器。
     #[n(5)]
     pub view: Vec<crate::session::StreamView>,
+    /// 开始时要不要防窥模式（之后的变化是 `ControllerMsg::Privacy`，见 `crate::session` 的"防窥模式"）：
+    /// 重连时带上，被控端就不会在重连的间隙里把本机屏幕露出来。false 时不写进线上的数组
+    #[cbor(n(6), skip_if = "crate::session::is_false")]
+    pub privacy: bool,
 }
 
 /// 被控端的决定（加密，见 [`HandshakeReply::verdict`]）。

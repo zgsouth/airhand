@@ -3,3 +3,5 @@
 # Gradle Wrapper 的启动脚本：Unix 版保持 LF，Windows 版保持 CRLF
 gradlew text eol=lf
 *.bat text eol=crlf
+# 虚拟显示器驱动：签名的目录文件（.cat）里有 INF 的哈希，换行符一改签名就对不上，原样保存
+client/src-tauri/windows/vdd/** -text

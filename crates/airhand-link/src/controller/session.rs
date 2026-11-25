@@ -18,7 +18,7 @@ use crate::transport::write_lane;
 use airhand_proto::media::{self, VideoHeader};
 use airhand_proto::session::{
     ByeReason, Codec, ControllerDatagram, ControllerMsg, DirectOffer, DisplayInfo, HostMsg,
-    MicState, Notice, Platform, REPORT_EVERY, SystemAction, VideoReport,
+    MicState, Notice, Platform, PrivacyState, REPORT_EVERY, SystemAction, VideoReport,
 };
 use airhand_proto::{MAX_STREAMS, datagram};
 use anyhow::Result;
@@ -293,6 +293,12 @@ pub enum SessionEvent {
     /// 被控端不支持（版本旧）时不会有。`detail`：出错时给排查问题用的技术信息（英文）
     Mic {
         state: MicState,
+        detail: Option<String>,
+    },
+    /// 被控端的防窥模式（见 [`super`] 的"防窥模式"）：会话开始时一次，之后有变化再来。
+    /// 被控端不支持时不会有。`detail`：没能打开时给排查问题用的技术信息（英文）
+    Privacy {
+        state: PrivacyState,
         detail: Option<String>,
     },
     /// `retry=false` 表示对方主动断开，不应自动重连
@@ -726,6 +732,15 @@ pub(super) async fn run(
                         MicState::Unsupported
                     };
                     let _ = out.event(SessionEvent::Mic { state, detail });
+                }
+                HostMsg::Privacy { state, detail } => {
+                    // 对方版本新增的状态：不知道是什么意思，当作开不了（界面显示开关，但不能打开）
+                    let state = if state.is_known() {
+                        state
+                    } else {
+                        PrivacyState::Unavailable
+                    };
+                    let _ = out.event(SessionEvent::Privacy { state, detail });
                 }
             }
         }

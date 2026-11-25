@@ -9,6 +9,10 @@
 //!
 //! 数据库里还存着服务器自己的密钥（[`Bindings::server_key`]，用来给发出去的控制码密钥签名，见 broker）：
 //! 和绑定表放在一起，服务器重启之后还认得以前发的密钥。
+//!
+//! 被控端放弃了的控制码（更换控制码）不是删掉就算了，而是**作废**（[`Bindings::retire`]），记在 `retired_codes` 表里
+//! （控制码和作废的时间）：谁的密钥都不认，[`RETIRED_HOLD`] 之内也不分给别人；之后可以分给新的被控端（作废的记录随之去掉），
+//! 没分出去的旧密钥照样不认，[`BINDING_TTL`] 之后清理。同一个控制码不会既绑定着、又作废了。
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -20,14 +24,27 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 pub const BINDING_TTL: Duration = Duration::from_secs(180 * 24 * 3600);
-const SCHEMA_VERSION: i64 = 2;
+/// 作废了的控制码（[`Bindings::retire`]）多久之内不分给别人
+pub const RETIRED_HOLD: Duration = Duration::from_secs(7 * 24 * 3600);
+const SCHEMA_VERSION: i64 = 3;
 
+/// 绑定（`fixed_codes` 表的一行）：控制码绑定给了持有某个密钥的被控端
 #[derive(Clone)]
 struct Binding {
+    /// 现在的密钥的哈希
     hash: Vec<u8>,
     /// 换过密钥、但还没确认被控端已经保存了新密钥时，旧密钥的哈希（见 [`Owner::Previous`]）
     prev: Option<Vec<u8>>,
     last_seen: i64,
+}
+
+/// 一个控制码在数据库里的样子（写入队列按控制码合并，只写最新的）
+#[derive(Clone)]
+enum Row {
+    /// 绑定着（`fixed_codes` 表）
+    Bound(Binding),
+    /// 作废了（`retired_codes` 表）：作废的时间
+    Retired(i64),
 }
 
 /// 被控端出示的密钥和绑定的关系
@@ -45,7 +62,8 @@ pub enum Owner {
 
 #[derive(Default)]
 struct Writes {
-    dirty: HashMap<u32, Option<Binding>>,
+    /// `None`：两张表里都没有这个控制码了
+    dirty: HashMap<u32, Option<Row>>,
     /// 排进来的最后一次写入的序号
     queued: u64,
     writing: bool,
@@ -61,6 +79,8 @@ struct Store {
 
 pub struct Bindings {
     entries: HashMap<u32, Binding>,
+    /// 作废了的控制码和作废的时间（[`Bindings::retire`]）。和 `entries` 不会有同一个控制码
+    retired: HashMap<u32, i64>,
     store: Option<Arc<Store>>,
     key: [u8; 32],
 }
@@ -124,12 +144,24 @@ fn open(path: &Path) -> Result<Connection> {
             PRAGMA user_version = 2; COMMIT;",
         )?;
     }
+    if version < 3 {
+        // 3：作废了的控制码（被控端更换了控制码）
+        db.execute_batch(
+            "BEGIN;
+            CREATE TABLE retired_codes (code INTEGER PRIMARY KEY, retired_at INTEGER NOT NULL);
+            CREATE INDEX retired_codes_retired_at ON retired_codes (retired_at);
+            PRAGMA user_version = 3; COMMIT;",
+        )?;
+    }
     Ok(db)
 }
 
-fn load(db: &Connection) -> Result<HashMap<u32, Binding>> {
+/// 绑定着的控制码，作废了的控制码和作废的时间
+type Loaded = (HashMap<u32, Binding>, HashMap<u32, i64>);
+
+fn load(db: &Connection) -> Result<Loaded> {
     let mut stmt = db.prepare("SELECT code, secret_hash, prev_hash, last_seen FROM fixed_codes")?;
-    Ok(stmt
+    let bound = stmt
         .query_map([], |r| {
             Ok((
                 r.get(0)?,
@@ -140,7 +172,12 @@ fn load(db: &Connection) -> Result<HashMap<u32, Binding>> {
                 },
             ))
         })?
-        .collect::<rusqlite::Result<_>>()?)
+        .collect::<rusqlite::Result<_>>()?;
+    let mut stmt = db.prepare("SELECT code, retired_at FROM retired_codes")?;
+    let retired = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok((bound, retired))
 }
 
 /// 服务器自己的密钥：第一次启动时生成，之后一直用同一个
@@ -176,18 +213,30 @@ fn writer(mut db: Connection, store: Arc<Store>) {
         };
         let result = (|| -> rusqlite::Result<()> {
             let tx = db.transaction()?;
-            for (code, binding) in &batch {
-                match binding {
-                    Some(b) => {
+            // 每个控制码两张表都写：从一张换到另一张（作废、作废了的分给新的被控端）在同一个事务里
+            for (code, row) in &batch {
+                if !matches!(row, Some(Row::Bound(_))) {
+                    tx.execute("DELETE FROM fixed_codes WHERE code = ?1", [code])?;
+                }
+                if !matches!(row, Some(Row::Retired(_))) {
+                    tx.execute("DELETE FROM retired_codes WHERE code = ?1", [code])?;
+                }
+                match row {
+                    Some(Row::Bound(b)) => {
                         tx.execute(
                         "INSERT INTO fixed_codes (code, secret_hash, prev_hash, last_seen) VALUES (?1, ?2, ?3, ?4)
                          ON CONFLICT (code) DO UPDATE SET secret_hash = excluded.secret_hash,
                            prev_hash = excluded.prev_hash, last_seen = excluded.last_seen",
                         params![code, &b.hash, &b.prev, b.last_seen])?;
                     }
-                    None => {
-                        tx.execute("DELETE FROM fixed_codes WHERE code = ?1", [code])?;
+                    Some(Row::Retired(at)) => {
+                        tx.execute(
+                            "INSERT INTO retired_codes (code, retired_at) VALUES (?1, ?2)
+                             ON CONFLICT (code) DO UPDATE SET retired_at = excluded.retired_at",
+                            params![code, at],
+                        )?;
                     }
+                    None => {}
                 }
             }
             tx.commit()
@@ -202,7 +251,7 @@ fn writer(mut db: Connection, store: Arc<Store>) {
             }
             Err(e) => {
                 warn!(
-                    "fixed control codes: persistence failed, retaining bindings and retrying: {e}"
+                    "control code database: write failed ({e}); the changes are still in effect in memory, retrying"
                 );
                 if s.stop {
                     store.cv.notify_all();
@@ -228,19 +277,21 @@ impl Bindings {
         let Some(path) = path else {
             return Ok(Self {
                 entries: HashMap::new(),
+                retired: HashMap::new(),
                 store: None,
                 key: rand::random(),
             });
         };
-        let (entries, key, db) = open(path)
+        let ((entries, retired), key, db) = open(path)
             .and_then(|db| Ok((load(&db)?, load_key(&db)?, db)))
             .with_context(|| {
                 format!("can't load control code ownership from {}", path.display())
             })?;
         info!(
-            "{} fixed control code(s) in {}",
+            "control code database {}: {} fixed control code(s), {} retired control code(s)",
+            path.display(),
             entries.len(),
-            path.display()
+            retired.len()
         );
         let store = Arc::new(Store {
             state: Mutex::default(),
@@ -254,6 +305,7 @@ impl Bindings {
             .context("can't start the code persistence worker")?;
         Ok(Self {
             entries,
+            retired,
             store: Some(store),
             key,
         })
@@ -264,17 +316,46 @@ impl Bindings {
         self.key
     }
 
+    /// 固定的控制码（绑定给了保存控制码的被控端，不管它在不在线）有几个
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// 作废了的控制码有几个（[`Bindings::retire`]，包括已经可以分给别人的）
+    pub fn retired_len(&self) -> usize {
+        self.retired.len()
+    }
+
+    /// `code` 绑定给了某个被控端（作废了的不算）
     pub fn contains(&self, code: u32) -> bool {
         self.entries.contains_key(&code)
     }
 
+    /// `code` 作废了（[`Bindings::retire`]）。只有测试用
+    #[cfg(test)]
+    pub fn is_retired(&self, code: u32) -> bool {
+        self.retired.contains_key(&code)
+    }
+
+    /// 哪些控制码可以分给新的被控端（在线的、保留着的由 broker 另外看）：没有绑定、也没有作废的，
+    /// 以及作废超过 [`RETIRED_HOLD`] 的。分出去的作废了的控制码，作废的记录随之去掉（[`Bindings::bind`]、
+    /// [`Bindings::remove`]）
+    pub fn assignable(&self) -> impl Fn(u32) -> bool + '_ {
+        let limit = now() - RETIRED_HOLD.as_secs() as i64;
+        move |code| {
+            !self.entries.contains_key(&code)
+                && self.retired.get(&code).is_none_or(|at| *at < limit)
+        }
+    }
+
     pub fn check(&self, code: u32, secret: &[u8; 16]) -> Owner {
         let Some(b) = self.entries.get(&code) else {
-            return Owner::Free;
+            // 作废了的：谁的密钥都不认
+            return if self.retired.contains_key(&code) {
+                Owner::Other
+            } else {
+                Owner::Free
+            };
         };
         let h = secret_hash(secret);
         if b.hash == h {
@@ -288,17 +369,23 @@ impl Bindings {
 
     fn persist(&self, code: u32) {
         if let Some(store) = &self.store {
+            let row = match (self.entries.get(&code), self.retired.get(&code)) {
+                (Some(b), _) => Some(Row::Bound(b.clone())),
+                (None, Some(at)) => Some(Row::Retired(*at)),
+                (None, None) => None,
+            };
             let mut s = store.state.lock().unwrap();
             s.queued += 1;
-            s.dirty.insert(code, self.entries.get(&code).cloned());
+            s.dirty.insert(code, row);
             store.cv.notify_one();
         }
     }
 
     /// 把 `code` 绑定给持有 `secret` 的被控端；`prev`：换了密钥、被控端可能还没保存时的旧密钥。
     /// 返回绑定有没有实质的变化（新绑定、换了密钥）：有的话调用方要等它落盘（[`Bindings::barrier`]）
-    /// 再告诉被控端，否则服务器崩溃之后被控端拿着新密钥也取不回控制码
+    /// 再告诉被控端，否则服务器崩溃之后被控端拿着新密钥也取不回控制码。作废了的控制码分给它时，作废的记录随之去掉
     pub fn bind(&mut self, code: u32, secret: &[u8; 16], prev: Option<&[u8; 16]>) -> bool {
+        self.retired.remove(&code);
         let hash = secret_hash(secret);
         let changed = self.entries.get(&code).is_none_or(|b| b.hash != hash);
         self.entries.insert(
@@ -320,21 +407,38 @@ impl Bindings {
         }
     }
 
-    pub fn remove(&mut self, code: u32) -> bool {
-        let removed = self.entries.remove(&code).is_some();
-        if removed {
-            self.persist(code);
-        }
-        removed
+    /// 被控端放弃了控制码（更换控制码）：作废，谁的密钥都不再认（[`Bindings::check`] 一律是 [`Owner::Other`]），
+    /// [`RETIRED_HOLD`] 之内也不分给别人（[`Bindings::assignable`]）。之后可以分给新的被控端，但旧密钥照样不认，
+    /// 直到分给了别人，或者 [`BINDING_TTL`] 之后清理。
+    ///
+    /// 不能直接删掉绑定：空闲的控制码只要出示本服务器为它签发过的密钥就能取回（服务器重启之后也认得，见 broker），
+    /// 删掉的话，还拿着旧密钥的被控端（例如老版本的客户端停下再启动被控端时）又把它取回去，
+    /// 换掉的控制码、用旧密钥算的重连凭证就又能用了。调用方要等它落盘（[`Bindings::barrier`]）
+    pub fn retire(&mut self, code: u32) {
+        self.entries.remove(&code);
+        self.retired.insert(code, now());
+        self.persist(code);
     }
 
+    /// 解除绑定；作废了的控制码去掉作废的记录（分给了不保存控制码的被控端、过期了）。返回有没有去掉什么
+    pub fn remove(&mut self, code: u32) -> bool {
+        let bound = self.entries.remove(&code).is_some();
+        let retired = self.retired.remove(&code).is_some();
+        if bound || retired {
+            self.persist(code);
+        }
+        bound || retired
+    }
+
+    /// 清理 [`BINDING_TTL`] 没有上线的绑定、作废了这么久的控制码。`online`：在线的不算
     pub fn expire(&mut self, online: impl Fn(u32) -> bool) {
         let limit = now() - BINDING_TTL.as_secs() as i64;
-        let old: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|(code, b)| b.last_seen < limit && !online(**code))
-            .map(|(code, _)| *code)
+        let bound = self.entries.iter().map(|(code, b)| (*code, b.last_seen));
+        let retired = self.retired.iter().map(|(code, at)| (*code, *at));
+        let old: Vec<_> = bound
+            .chain(retired)
+            .filter(|(code, at)| *at < limit && !online(*code))
+            .map(|(code, _)| code)
             .collect();
         for code in old {
             self.remove(code);
@@ -374,6 +478,20 @@ mod tests {
         std::env::temp_dir()
             .join(format!("airhand-codes-test-{:016x}", rand::random::<u64>()))
             .join("airhand.db")
+    }
+
+    /// 数据库里 `code` 在 `(fixed_codes, retired_codes)` 里各有几行
+    fn rows(path: &Path, code: u32) -> (i64, i64) {
+        let db = Connection::open(path).unwrap();
+        let count = |table: &str| {
+            db.query_row(
+                &format!("SELECT count(*) FROM {table} WHERE code = ?1"),
+                [code],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        (count("fixed_codes"), count("retired_codes"))
     }
 
     #[tokio::test]
@@ -419,6 +537,71 @@ mod tests {
         // 被控端拿着新密钥回来了：旧的不再认
         again.bind(123456, &[2; 16], None);
         assert_eq!(again.check(123456, &[1; 16]), Owner::Other);
+    }
+
+    /// 作废了的控制码记在 retired_codes 表里，谁的密钥都不认（包括原来的和换密钥之前的），服务器重启之后也一样；
+    /// [`RETIRED_HOLD`] 之内不分给别人，之后可以分了（分出去之前旧密钥照样不认），[`BINDING_TTL`] 之后清理
+    #[tokio::test]
+    async fn retired_codes_accept_no_secret() {
+        let path = temp();
+        let mut b = Bindings::open(Some(&path)).unwrap();
+        b.bind(123456, &[2; 16], Some(&[1; 16]));
+        b.retire(123456);
+        assert!(!b.contains(123456) && b.is_retired(123456));
+        for secret in [[1; 16], [2; 16], [3; 16]] {
+            assert_eq!(b.check(123456, &secret), Owner::Other);
+        }
+        // 没绑定过的（不保存控制码的被控端放弃的）也一样作废
+        b.retire(654321);
+        assert_eq!(b.check(654321, &[1; 16]), Owner::Other);
+        assert!(b.barrier().wait(Duration::from_secs(5)).await);
+        drop(b);
+        assert_eq!(rows(&path, 123456), (0, 1));
+        assert_eq!(rows(&path, 654321), (0, 1));
+
+        let mut again = Bindings::open(Some(&path)).unwrap();
+        assert_eq!((again.len(), again.retired_len()), (0, 2));
+        assert!(again.is_retired(123456));
+        for secret in [[1; 16], [2; 16]] {
+            assert_eq!(again.check(123456, &secret), Owner::Other);
+        }
+        assert!(!again.assignable()(123456), "just retired");
+
+        // 作废超过 RETIRED_HOLD：可以分给新的被控端了，但还没清理，旧密钥照样不认
+        let held = now() - RETIRED_HOLD.as_secs() as i64 - 60;
+        again.retired.insert(123456, held);
+        again.retired.insert(654321, held);
+        assert!(again.assignable()(123456));
+        again.expire(|_| false);
+        assert!(
+            again.is_retired(123456),
+            "retired a week ago, not expired yet"
+        );
+        assert_eq!(again.check(123456, &[2; 16]), Owner::Other);
+        // 别的绑定一样久没上线也不分给别人；什么都没有的可以分
+        again.bind(111111, &[4; 16], None);
+        again.entries.get_mut(&111111).unwrap().last_seen = held;
+        assert!(!again.assignable()(111111));
+        assert!(again.assignable()(222222));
+
+        // 分给了新的被控端：保存控制码的绑定给它，不保存的去掉作废的记录；数据库里跟着变
+        assert!(again.bind(123456, &[5; 16], None));
+        assert!(!again.is_retired(123456));
+        assert_eq!(again.check(123456, &[5; 16]), Owner::Current);
+        assert_eq!(again.check(123456, &[2; 16]), Owner::Other);
+        assert!(again.remove(654321));
+        assert_eq!(again.check(654321, &[1; 16]), Owner::Free);
+        assert!(again.barrier().wait(Duration::from_secs(5)).await);
+        assert_eq!(rows(&path, 123456), (1, 0));
+        assert_eq!(rows(&path, 654321), (0, 0));
+
+        // BINDING_TTL 之后清理
+        again.retire(333333);
+        again.retired.insert(333333, 1);
+        again.expire(|_| false);
+        assert_eq!(again.check(333333, &[2; 16]), Owner::Free);
+        assert!(again.barrier().wait(Duration::from_secs(5)).await);
+        assert_eq!(rows(&path, 333333), (0, 0));
     }
 
     /// 别人一直在写，屏障也只等调用之前的那些
@@ -493,7 +676,8 @@ mod tests {
         .unwrap();
         db.execute_batch("PRAGMA user_version = 99").unwrap();
         assert!(Bindings::open(Some(&path)).is_err());
-        db.execute_batch("PRAGMA user_version = 2").unwrap();
+        db.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
+            .unwrap();
         let saved = Bindings::open(Some(&path)).unwrap();
         assert_eq!(saved.check(123456, &[7; 16]), Owner::Current);
         assert_eq!(saved.server_key(), key);
@@ -505,7 +689,7 @@ mod tests {
         assert_eq!(Bindings::open(None).unwrap().len(), 0);
     }
 
-    /// 版本 1 的数据库（之前的服务器建的）升级到 2，原来的绑定都还在
+    /// 版本 1 的数据库（之前的服务器建的）一路升级到现在的版本，原来的绑定都还在，有了记作废的表
     #[test]
     fn upgrades_a_version_1_database() {
         let path = temp();
@@ -523,10 +707,12 @@ mod tests {
         drop(db);
         let b = Bindings::open(Some(&path)).unwrap();
         assert_eq!(b.check(123456, &[7; 16]), Owner::Current);
+        assert_eq!(b.retired_len(), 0);
         let v: i64 = Connection::open(&path)
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(rows(&path, 123456), (1, 0));
     }
 }

@@ -188,6 +188,8 @@ export default {
   "session.avSyncHint": "画面等声音对齐，适合看视频；操作会变慢",
   "session.mic": "麦克风",
   "session.micOn": "麦克风（正在发给对方）",
+  "session.privacy": "防窥模式",
+  "session.privacyOn": "防窥模式（对方的显示器黑屏）",
   "session.mouse": "鼠标：{mode}",
   "session.mouseLocked": "鼠标已锁定在画面上，长按 Esc 放开",
   "session.clickToLock": "点击画面锁定鼠标",
@@ -263,6 +265,20 @@ export default {
   "mic.local.denied": "没有允许使用麦克风：请在浏览器的网站设置或系统的隐私设置里允许",
   "mic.local.noDevice": "本机没有可用的麦克风",
   "mic.local.failed": "无法打开本机麦克风",
+
+  // 防窥模式：对方的显示器黑屏、键盘鼠标不起作用，只有控制端看得到、操作得了
+  "privacy.toggle": "防窥模式",
+  "privacy.off": "打开后，对方电脑的显示器全部黑屏、键盘鼠标不起作用，只有你看得到、操作得了（画面换成一块虚拟显示器）。断开连接后自动恢复",
+  "privacy.starting": "正在打开：对方电脑正在换成虚拟显示器，要几秒钟",
+  "privacy.on": "已打开：对方电脑的显示器全部黑屏、键盘鼠标不起作用。断开连接 30 秒后自动恢复（期间重连会接着保持）",
+  "privacy.failed": "没能打开（{detail}），对方的屏幕已经恢复。可以再试一次",
+  "privacy.unavailable": "对方电脑用不了：需要为所有用户安装 Airhand，并在安装时装上虚拟显示器驱动",
+  "privacy.notAllowed": "对方电脑的设置不允许防窥模式（config.toml 里的 privacy_mode）",
+  "privacy.note": "对方电脑前的人可以断开它的网络或者重启它来结束防窥模式",
+  // 对方是 Mac：显示器调黑、盖上黑窗口，不换虚拟显示器（见 client/src-tauri/src/host/virtual_display/curtain.rs）
+  "privacy.offMac": "打开后，对方 Mac 的显示器全部黑屏、键盘鼠标和触控板不起作用，只有你看得到、操作得了。断开连接后自动恢复",
+  "privacy.startingMac": "正在打开",
+  "privacy.unavailableMac": "对方 Mac 用不了：要先在那台 Mac 的“系统设置 → 隐私与安全性 → 辅助功能”里允许 Airhand（挡住它的键盘鼠标要用到）",
 
   // 快捷键
   "combo.winStart": "Win 开始菜单",

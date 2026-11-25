@@ -2,7 +2,8 @@
 //! 不包括麦克风，也不包括本进程自己播放的声音。
 //!
 //! 直接让系统输出 48 kHz 立体声 float，不需要自己重采样。ScreenCaptureKit 必须指定一个显示器，
-//! 这里用主显示器，画面按最小尺寸、最低帧率输出并直接丢掉。
+//! 这里用主显示器，画面按最小尺寸、最低帧率输出并直接丢掉。一个显示器都没有（合着盖子，补屏的虚拟显示器还没出来）时
+//! 打不开，报 [`super::NoDisplay`]：不当作采集失败，过一会儿再试。
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -48,8 +49,8 @@ impl Loopback {
         let display = macos::displays()
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("no display to attach the audio capture to"))?;
-        let target = sck::shareable_display(display.id)?;
+            .ok_or(super::NoDisplay)?;
+        let target = sck::shareable_display(display.id, &[])?;
         let config = unsafe {
             let c = SCStreamConfiguration::new();
             c.setCapturesAudio(true);

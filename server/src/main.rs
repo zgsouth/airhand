@@ -4,7 +4,7 @@
 //! * `AIRHAND_LISTEN`        监听地址，默认 `0.0.0.0:4433`（UDP）
 //! * `AIRHAND_CERT`          证书路径，默认 `data/cert.pem`，`data` 是服务端程序旁边的文件夹（不存在则自动创建，证书不存在则自动生成）
 //! * `AIRHAND_KEY`           私钥路径，默认 `data/key.pem`（同上）
-//! * `AIRHAND_DB`            SQLite 数据库（固定控制码的绑定表，见 [`codes`]），默认和证书放在同一个目录（默认 `data/airhand.db`）
+//! * `AIRHAND_DB`            SQLite 数据库（固定控制码的绑定表、作废了的控制码，见 [`codes`]），默认和证书放在同一个目录（默认 `data/airhand.db`）
 //! * `AIRHAND_CERT_NAMES`    自动生成证书时的 SAN，逗号分隔，默认 `airhand,localhost`
 //! * `AIRHAND_MAX_SESSIONS`  每台被控端最多同时被几个控制端连接，默认 4
 //! * `AIRHAND_MAX_CONNS_PER_IP` 同一个来源（IPv4 地址 / IPv6 的 /64）最多同时有几条连接，默认 128
@@ -206,9 +206,17 @@ async fn main() -> Result<()> {
             tick.tick().await;
             loop {
                 tick.tick().await;
-                let (hosts, pending, fixed) = broker.stats();
-                let relayed_files = format_size(broker.relayed_file_bytes());
-                info!(hosts, pending, fixed, %relayed_files, "online");
+                let st = broker.stats();
+                info!(
+                    "status: {} host(s) online, {} session(s) ({} still starting), {} fixed control code(s), \
+                     {} retired control code(s), {} of clipboard files relayed since startup",
+                    st.hosts,
+                    st.sessions,
+                    st.starting,
+                    st.fixed,
+                    st.retired,
+                    format_size(broker.relayed_file_bytes())
+                );
             }
         });
     }

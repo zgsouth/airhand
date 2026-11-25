@@ -16,6 +16,8 @@
 // * 画面增强（可选）：要放大时在 Worker 里用显卡放大、锐化，canvas 就是显示的大小（见 enhance.ts）；
 // * 只有当前正在查看的会话播放声音，其余会话通知被控端停止采集声音；
 // * 本机麦克风（可选，默认关）：也只发给当前正在查看的会话，被控端放进它的虚拟麦克风（见 mic.ts）；
+// * 防窥模式（可选，默认关，装了虚拟显示器驱动的 Windows、允许了辅助功能的 macOS 被控端）：对方的显示器黑屏、键盘鼠标
+//   不起作用（Windows 的画面换成一块虚拟显示器）。开关跟着这个标签走：断线重连时在连接选项里带上，对方一直保持防窥；
 // * 音画同步（可选）：按采集时间把画面推迟到与声音对齐后再解码显示，见 avsync.ts（也在 Worker 里）。
 import {
   api,
@@ -32,6 +34,7 @@ import {
   type SessionEvent,
   type MicState,
   type Platform,
+  type PrivacyState,
   type StreamView,
   type SystemAction,
   type FileEntry,
@@ -152,6 +155,12 @@ export class RemoteSession {
   micEnabled = false;
   /** 本机采集不了麦克风的原因（用户再打开时清掉） */
   micError: MicError | null = null;
+  /** 对方的防窥模式（hello 之后对方会说）；对方不支持、还没说时为 null：不显示这个开关 */
+  privacyState: PrivacyState | null = null;
+  /** 没能打开防窥的原因（英文技术信息） */
+  privacyDetail: string | null = null;
+  /** 要防窥模式（开关）：重连时在连接选项里带上，对方就一直保持防窥。跟着对方说的状态变 */
+  privacyWanted = false;
   /** 对方复制的文件（网页版：等用户点下载，见 files.ts）；没有时为 null */
   remoteFiles: { clip: number; items: FileEntry[] } | null = null;
   /** 正在把对方复制的文件取下来：已经取了多少、一共多少（字节） */
@@ -386,6 +395,9 @@ export class RemoteSession {
     this.micState = null;
     this.micDetail = null;
     this.micOn = false;
+    // 防窥模式也一样：对方重新说。要不要在握手里就告诉它（下面的连接选项）
+    this.privacyState = null;
+    this.privacyDetail = null;
     this.attemptAt = performance.now();
     let info;
     // 开始时的画质、要不要声音、看哪几个显示器在端到端握手里就告诉对方：它一开始就按这个建编码器，
@@ -398,7 +410,15 @@ export class RemoteSession {
     try {
       info = await api.connect(
         this.code,
-        { resume: this.resume, hostKey: this.hostKey, pairing: this.pairing, settings: sent, audio, view },
+        {
+          resume: this.resume,
+          hostKey: this.hostKey,
+          pairing: this.pairing,
+          settings: sent,
+          audio,
+          view,
+          privacy: this.privacyWanted,
+        },
         this.view,
         onEvent,
         this.clipboardSync,
@@ -604,6 +624,8 @@ export class RemoteSession {
         this.updateView();
         break;
       case "displays":
+        // 对方补上了显示器（虚拟显示器）、插回了显示器：撤下"没有显示器"
+        if (ev.displays.length > 0 && this.notice?.kind === "noDisplays") this.notice = null;
         this.setShown(ev.displays, ev.current, ev.shown);
         this.layout();
         // 同时看所有显示器时：对方插上了新的显示器也要看
@@ -630,6 +652,12 @@ export class RemoteSession {
         this.micState = ev.state;
         this.micDetail = ev.detail;
         this.syncMic();
+        break;
+      case "privacy":
+        this.privacyState = ev.state;
+        this.privacyDetail = ev.detail;
+        // 开关跟着对方说的变：别的控制端打开 / 关掉了、没能打开，都以对方的为准
+        this.privacyWanted = ev.state === "on" || ev.state === "starting";
         break;
       case "clipboardFiles":
         this.remoteFiles = { clip: ev.clip, items: ev.items };
@@ -1159,6 +1187,20 @@ export class RemoteSession {
     this.micEnabled = v;
     if (v) this.micError = null;
     this.syncMic();
+    this.emit();
+  }
+
+  /**
+   * 打开 / 关闭对方的防窥模式。先显示成正在打开 / 已关闭，对方换好了再说（换成虚拟显示器要几秒）。
+   * 还没连上时只记下来，连上时在连接选项里告诉对方
+   */
+  setPrivacy(on: boolean) {
+    this.privacyWanted = on;
+    if (this.sid !== null && this.privacyState !== null) {
+      this.command({ cmd: "privacy", sid: this.sid, on });
+      this.privacyState = on ? "starting" : "off";
+      this.privacyDetail = null;
+    }
     this.emit();
   }
 

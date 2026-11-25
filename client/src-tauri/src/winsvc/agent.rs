@@ -15,7 +15,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::w;
 
-use crate::host::HostService;
+use crate::host::{HostCode, HostService};
 use crate::{config, status};
 
 fn arg<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -28,6 +28,8 @@ fn arg<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 pub fn run(args: &[String]) -> i32 {
     super::init_debug_logging();
     crate::enable_dpi_awareness();
+    // 双显卡电脑上桌面复制要找对显卡：在用到 DXGI 之前
+    crate::host::capture::ignore_gpu_preference();
 
     // 同一时刻只能有一个被控端（服务保证这一点；这里防止手动运行的 --agent 和服务里的同时注册）
     let _single = unsafe {
@@ -62,7 +64,7 @@ pub fn run(args: &[String]) -> i32 {
     }
     config::keep_file();
     let hub = status::new_hub();
-    let host = HostService::start(hub.clone());
+    let host = HostService::start(hub.clone(), HostCode::default());
     let agent = super::ipc::Agent {
         cmds: host.commands(),
         autostart: Arc::new(watch::Sender::new(config::settings().autostart)),
@@ -84,6 +86,10 @@ pub fn run(args: &[String]) -> i32 {
     info!("stopping the host");
     // 中止被控端：断开所有会话、关闭到服务器的连接（给 QUIC 一点时间把关闭帧发出去）
     drop(host);
+    // 还有远程控制（连着的、断线了在等的）就当它结束了：先锁屏，再恢复本机的显示器（见 host::ending）
+    crate::host::ending::shutdown();
+    // 虚拟显示器恢复原样：停用它，防窥撤下的本机显示器放回去（服务最多等 5 秒，这里最多等 5 秒）
+    crate::host::virtual_display::shutdown();
     std::thread::sleep(Duration::from_millis(300));
     for h in handles {
         unsafe {

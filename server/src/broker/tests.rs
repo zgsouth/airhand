@@ -74,8 +74,14 @@ fn incoming(
 /// 控制端握手的第一条消息（第一次连这个控制码，不配对）
 fn initiate(code: u32) -> (Initiator, Vec<u8>) {
     let me = Identity::generate();
-    let intro =
-        secure::controller_intro("ctl", "test", QualitySettings::default(), false, Vec::new());
+    let intro = secure::controller_intro(
+        "ctl",
+        "test",
+        QualitySettings::default(),
+        false,
+        Vec::new(),
+        false,
+    );
     secure::initiate(InitiatorParams {
         code,
         me: &me,
@@ -277,7 +283,7 @@ async fn a_signal_version_mismatch_cannot_register() {
             .unwrap(),
             Ok(None) | Err(_)
         ));
-        assert_eq!(broker.stats(), (0, 0, 0));
+        assert_eq!(broker.stats(), Stats::default());
     }
     task.abort();
 }
@@ -534,7 +540,7 @@ async fn resume_and_wait_for_the_host() {
 
     // 被控端掉线
     host.conn.close(VarInt::from_u32(0), b"");
-    wait_until("the host is gone", || broker.stats().0 == 0).await;
+    wait_until("the host is gone", || broker.stats().hosts == 0).await;
     drop(host);
 
     // 这个 IP 已经被限速了，带凭证的重连照样不受影响，也不算猜错
@@ -631,7 +637,7 @@ async fn controller_service_waits_for_the_host() {
     let token = Some(first.unwrap().resume);
 
     host_conn.close(VarInt::from_u32(0), b"");
-    wait_until("the host is gone", || broker.stats().0 == 0).await;
+    wait_until("the host is gone", || broker.stats().hosts == 0).await;
     host.abort();
     for _ in 0..FAIL_LIMIT {
         broker.record_failure(ip);
@@ -1030,7 +1036,7 @@ async fn rekey_voids_tokens_and_keeps_the_code() {
 
     // 服务器重启（新的绑定在回答 Rekeyed 之前就落盘了）
     host.conn.close(VarInt::from_u32(0), b"");
-    wait_until("the host is gone", || broker.stats().0 == 0).await;
+    wait_until("the host is gone", || broker.stats().hosts == 0).await;
     broker.flush_bindings().await;
     drop((host, ctrl, broker));
     let (broker, cfg) = start_with(Some(file)).await;
@@ -1039,12 +1045,12 @@ async fn rekey_voids_tokens_and_keeps_the_code() {
     assert_eq!(again.code, id.code);
     assert!(again.secret != id.secret && again.secret != secret);
     h1.conn.close(VarInt::from_u32(0), b"");
-    wait_until("the host is gone", || broker.stats().0 == 0).await;
+    wait_until("the host is gone", || broker.stats().hosts == 0).await;
     // 带着新密钥回来：之后旧密钥不再认
     let (h2, back) = register_with(&cfg, Some(again), true).await;
     assert_eq!(back, again);
     h2.conn.close(VarInt::from_u32(0), b"");
-    wait_until("the host is gone", || broker.stats().0 == 0).await;
+    wait_until("the host is gone", || broker.stats().hosts == 0).await;
     broker.reserved.lock().clear();
     let (_h3, stolen) = register_with(&cfg, Some(id), true).await;
     assert_ne!(stolen.code, id.code);
@@ -1074,7 +1080,7 @@ async fn repeated_rekey_preserves_the_last_confirmed_secret() {
         crate::codes::Owner::Previous
     );
     host.conn.close(VarInt::from_u32(0), b"replies not saved");
-    wait_until("the host disconnected", || broker.stats().0 == 0).await;
+    wait_until("the host disconnected", || broker.stats().hosts == 0).await;
     broker.flush_bindings().await;
     let (restarted, cfg) = start_with(Some(file)).await;
     let (mut host, recovered) = register_full(&cfg, Some(saved), true, true).await;
@@ -1293,7 +1299,7 @@ async fn rekey_on_register_survives_a_lost_answer_and_a_restart() {
     );
     // 新密钥又没收到、拿着旧的回来：控制码还给它，但再换一个，旧凭证一直作废
     h1.conn.close(VarInt::from_u32(0), b"");
-    wait_until("the host is gone", || broker.stats().0 == 0).await;
+    wait_until("the host is gone", || broker.stats().hosts == 0).await;
     let (_h2, third) = register(&cfg, Some(id)).await;
     assert_eq!(third.code, id.code);
     assert!(third.secret != id.secret && third.secret != again.secret);
@@ -1326,7 +1332,7 @@ async fn stale_tokens_are_revoked_and_never_count_as_guesses() {
     );
     // 对方不在线：等它
     host.conn.close(VarInt::from_u32(0), b"");
-    wait_until("the host is gone", || broker.stats().0 == 0).await;
+    wait_until("the host is gone", || broker.stats().hosts == 0).await;
     drop(host);
     assert_eq!(
         ask(&mut ctrl, 3, id.code, Some(stale)).await.unwrap_err(),
@@ -2024,7 +2030,9 @@ async fn sessions_are_limited_per_source_and_code() {
         token = Some(grant.resume);
         assert!(matches!(next(&mut host).await, ServerMsg::Incoming { .. }));
     }
-    assert_eq!(broker.stats().1, 3);
+    assert_eq!(broker.stats().sessions, 3);
+    // 只批准了、两端都没开控制通道：都还在建立
+    assert_eq!(broker.stats().starting, 3);
 
     for (req, resume) in [(10, None), (11, token)] {
         assert_eq!(
@@ -2037,7 +2045,7 @@ async fn sessions_are_limited_per_source_and_code() {
         ask(&mut second, 1, id.code, None).await.unwrap_err(),
         ConnectError::RateLimited
     );
-    assert_eq!(broker.stats().1, 3);
+    assert_eq!(broker.stats().sessions, 3);
     assert_eq!(broker.failure_count(ip), 0);
     // 被控端没有再收到请求：下一条消息是它自己换密钥的回答
     write_msg(&mut host.send, &ClientMsg::Rekey { secret: id.secret })
@@ -2086,19 +2094,19 @@ async fn connections_are_limited_per_network() {
 }
 
 /// 固定的控制码：服务器重启（只剩数据库里的绑定）之后，只有原来的被控端能取回，别人拿不走；
-/// 被控端放弃（Release）后解除绑定，也不再保留
+/// 被控端放弃（Release）后作废（谁的密钥都不认），也不再保留
 #[tokio::test]
 async fn fixed_codes_are_never_handed_out() {
     let (dir, file) = temp_db();
     let (old, cfg) = start_with(Some(file.clone())).await;
     let (host, id) = register_with(&cfg, None, true).await;
     host.conn.close(VarInt::from_u32(0), b"");
-    wait_until("the host is gone", || old.stats().0 == 0).await;
+    wait_until("the host is gone", || old.stats().hosts == 0).await;
     old.flush_bindings().await;
     drop((host, old));
 
     let (broker, cfg) = start_with(Some(file.clone())).await;
-    assert_eq!(broker.stats().2, 1);
+    assert_eq!(broker.stats().fixed, 1);
     // 冒领：知道控制码、不知道密钥
     let thief = Reclaim {
         code: id.code,
@@ -2110,17 +2118,75 @@ async fn fixed_codes_are_never_handed_out() {
     let (mut host, again) = register_with(&cfg, Some(id), true).await;
     assert_eq!(again, id);
 
-    // 放弃控制码：解除绑定，断开后不保留
+    // 放弃控制码：作废，断开后不保留
     write_msg(&mut host.send, &ClientMsg::Release)
         .await
         .unwrap();
-    wait_until("the binding is removed", || broker.stats().2 == 0).await;
+    wait_until("the code is retired", || {
+        broker.bindings.lock().is_retired(id.code)
+    })
+    .await;
+    let st = broker.stats();
+    assert_eq!((st.fixed, st.retired), (0, 1));
     host.conn.close(VarInt::from_u32(0), b"");
-    wait_until("the host is gone", || broker.stats().0 == 1).await;
+    wait_until("the host is gone", || broker.stats().hosts == 1).await;
     assert!(!broker.reserved.lock().contains_key(&id.code));
     // Persistence is asynchronous; await the disk barrier outside broker locks.
     broker.flush_bindings().await;
-    assert!(!Bindings::open(Some(&file)).unwrap().contains(id.code));
+    let saved = Bindings::open(Some(&file)).unwrap();
+    assert!(saved.is_retired(id.code) && !saved.contains(id.code));
+    assert_eq!(saved.check(id.code, &id.secret), crate::codes::Owner::Other);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 更换控制码（Release）之后，拿着旧密钥的被控端取不回换掉的控制码：正在断开时、断开之后、服务器重启之后都一样，
+/// 保存控制码（`keep`）的和不保存的都一样。老版本的客户端停下再启动被控端（macOS / Linux 打开、关掉控制台）时
+/// 带着的就是更换之前的控制码；空闲的控制码出示本服务器签发过的密钥就能取回，所以放弃了的控制码不能只是删掉绑定
+#[tokio::test]
+async fn released_codes_cannot_be_reclaimed() {
+    let (dir, file) = temp_db();
+    let (broker, cfg) = start_with(Some(file.clone())).await;
+    let mut released = Vec::new();
+    for keep in [true, false] {
+        let (mut host, id) = register_with(&cfg, None, keep).await;
+        write_msg(&mut host.send, &ClientMsg::Release)
+            .await
+            .unwrap();
+        wait_until("the server handled the release", || {
+            broker
+                .hosts
+                .lock()
+                .get(&id.code)
+                .is_some_and(|h| h.released)
+        })
+        .await;
+        // 还没断开（服务器还登记着它）：不能顶替它取走控制码
+        let (_other, got) = register_with(&cfg, Some(id), keep).await;
+        assert_ne!(
+            got.code, id.code,
+            "taken over while disconnecting (keep: {keep})"
+        );
+        host.conn.close(VarInt::from_u32(0), b"");
+        wait_until("the host is gone", || {
+            !broker.hosts.lock().contains_key(&id.code)
+        })
+        .await;
+        let (_again, got) = register_with(&cfg, Some(id), keep).await;
+        assert_ne!(
+            got.code, id.code,
+            "reclaimed after disconnecting (keep: {keep})"
+        );
+        released.push(id);
+    }
+    broker.flush_bindings().await;
+    drop(broker);
+
+    // 服务器重启之后（只剩数据库，服务器的密钥还是那个，以前签发的密钥都认得）
+    let (_broker, cfg) = start_with(Some(file)).await;
+    for id in released {
+        let (_host, got) = register_with(&cfg, Some(id), true).await;
+        assert_ne!(got.code, id.code, "reclaimed after a server restart");
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -2172,7 +2238,7 @@ async fn video_takes_the_direct_path_and_falls_back_to_the_relay() {
         }
     }
 
-    let (_broker, cfg) = start().await;
+    let (broker, cfg) = start().await;
     let relay: SocketAddr = cfg.server.parse().unwrap();
     let (mut host, id) = register(&cfg, None).await;
     let (hub, _hub_task) = DirectHub::start(&host.endpoint, &host.punch, &host.conn).unwrap();
@@ -2227,6 +2293,9 @@ async fn video_takes_the_direct_path_and_falls_back_to_the_relay() {
         (inc.session_id, io, kick)
     };
     let (info, (session_id, mut io, _kick)) = tokio::join!(connecting, accepting);
+    // 端到端握手走过了两端的控制通道：会话已经建立起来了
+    let st = broker.stats();
+    assert_eq!((st.sessions, st.starting), (1, 0));
     let paths = Arc::new(Paths::default());
     io.incoming.set_acks(paths.clone());
     // 会话开始了（发了 Hello）：开始建直连

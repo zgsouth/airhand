@@ -19,7 +19,11 @@ mod x11;
 
 use airhand_proto::session::{DisplayInfo, InputEvent};
 
+#[cfg(target_os = "macos")]
+pub(crate) use macos::{INJECTED, modifier_mask};
 pub use thread::InjectorThread;
+#[cfg(windows)]
+pub(crate) use windows::INJECTED;
 
 pub struct Injector {
     #[cfg(windows)]

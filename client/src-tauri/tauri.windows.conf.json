@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "windows/vdd/MttVDD.inf": "vdd/MttVDD.inf",
+      "windows/vdd/mttvdd.cat": "vdd/mttvdd.cat",
+      "windows/vdd/MttVDD.dll": "vdd/MttVDD.dll",
+      "windows/vdd/LICENSE.txt": "vdd/LICENSE.txt"
+    }
+  }
+}

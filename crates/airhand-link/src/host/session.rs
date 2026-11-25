@@ -151,6 +151,8 @@ pub enum Request {
     Audio(bool),
     /// 打开 / 关闭控制端的麦克风（见 [`MicSink`]）
     Mic(bool),
+    /// 打开 / 关闭防窥模式（见 `airhand_proto::session` 的"防窥模式"）。不支持的平台什么也不做
+    Privacy(bool),
 }
 
 /// 控制端要看的显示器（[`Request::View`]）落到这台被控端上（`displays` 个显示器，最多同时发 `max` 路）：
@@ -172,7 +174,7 @@ pub fn resolve_view(view: &[StreamView], displays: usize, max: u8) -> Vec<Stream
     out
 }
 
-/// 会话怎么开始：控制端在握手里给的画质、要不要声音、看哪几个显示器
+/// 会话怎么开始：控制端在握手里给的画质、要不要声音、看哪几个显示器、要不要防窥模式
 #[derive(Debug, Clone, PartialEq)]
 pub struct Start {
     /// 做过范围校验
@@ -180,6 +182,8 @@ pub struct Start {
     pub audio: bool,
     /// 看哪几个显示器（和 [`Request::View`] 一样没检查过；空的是只看主显示器）
     pub view: Vec<StreamView>,
+    /// 一开始就要防窥模式（重连时控制端带上的，见 `airhand_proto::session` 的"防窥模式"）
+    pub privacy: bool,
 }
 
 /// 交给平台的发送端（[`serve`] 的 `platform` 拿到它们）
@@ -324,6 +328,7 @@ async fn drive<P: Platform>(
             settings: admitted.settings,
             audio: admitted.audio,
             view: admitted.view.clone(),
+            privacy: admitted.privacy,
         })
         .await?;
     info!(session_id, "session started");
@@ -485,6 +490,7 @@ mod tests {
             settings: QualitySettings::default(),
             audio: true,
             view: Vec::new(),
+            privacy: false,
         }
     }
 
@@ -657,6 +663,7 @@ mod tests {
                     settings: QualitySettings::default(),
                     audio: true,
                     view: Vec::new(),
+                    privacy: false,
                 }),
                 Call::Request(Request::Input(click())),
                 Call::Request(Request::Settings(fast().sanitized())),

@@ -13,6 +13,8 @@
 //! | `--install-user` | 仅为当前用户安装：复制完文件后记下安装位置（见 [`user`]） | 用户自己 |
 //! | `--stop` | 升级：覆盖文件之前停下这一份 Airhand（服务、托盘），运行的是旧版本 | 安装时的身份 |
 //! | `--uninstall` | 卸载：删除这一份注册的东西，停下它；文件由卸载程序删除 | 安装时的身份 |
+//! | `--install-vdd` | 安装（升级）虚拟显示器驱动（见 `host::virtual_display`）。退出码：0 装好了，2 用户在 Windows 的提示里选了不装，3 已经有别人装的 | 管理员 |
+//! | `--uninstall-vdd` | 删除 Airhand 装的虚拟显示器驱动（卸载时用户勾选了的话） | 管理员 |
 //!
 //! `--stop` 和 `--uninstall` 两种安装方式通用，只动属于这个 airhand.exe 的东西（服务运行的是它、记下的安装位置是它）：
 //! 另一份安装的服务和托盘不受影响。托盘在一个命名事件上等着被叫退出（[`watch_quit`]），安装包也靠它判断
@@ -145,6 +147,14 @@ pub fn cli() -> Option<i32> {
         "--uninstall" => {
             init_console_logging();
             uninstall()
+        }
+        "--install-vdd" => {
+            init_console_logging();
+            return Some(install_vdd());
+        }
+        "--uninstall-vdd" => {
+            init_console_logging();
+            crate::host::virtual_display::device::uninstall()
         }
         _ => return None,
     };
@@ -579,6 +589,27 @@ fn install() -> Result<()> {
     Ok(())
 }
 
+/// `--install-vdd`：装上安装目录里的虚拟显示器驱动（`vdd\MttVDD.inf`）。退出码见模块说明
+fn install_vdd() -> i32 {
+    use crate::host::virtual_display::device::{Installed, install};
+    let inf = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("vdd").join("MttVDD.inf")));
+    let Some(inf) = inf else {
+        eprintln!("--install-vdd failed: can't find the installation directory");
+        return 1;
+    };
+    match install(&inf) {
+        Ok(Installed::Done) => 0,
+        Ok(Installed::Declined) => 2,
+        Ok(Installed::Foreign) => 3,
+        Err(e) => {
+            eprintln!("--install-vdd failed: {e:#}");
+            1
+        }
+    }
+}
+
 /// `--uninstall`：删除这一份 Airhand 注册的东西——服务运行的是它的话删除服务和开机启动项（需要管理员权限），
 /// 记下的仅为当前用户安装的位置是它的话删除记录和登录时启动项——然后让它的托盘退出、等它的进程都退出。
 /// 别的安装的东西不动。安装目录里的文件由卸载程序删除
@@ -596,6 +627,8 @@ fn uninstall() -> Result<()> {
             info!("the Airhand service is removed");
         }
         set_run_key(false)?;
+        // 被控端停下来了：它没来得及恢复的（虚拟显示器启用着、防窥撤下了本机的显示器）这里恢复，之后没人再管了
+        crate::host::virtual_display::recover();
     }
     user::unregister()?;
     ask_tray_to_quit();
@@ -610,6 +643,8 @@ fn stop_for_upgrade() -> Result<()> {
     let service = service_is_mine()?;
     if service && let Some(svc) = open_service(SERVICE_STOP | SERVICE_QUERY_STATUS)? {
         stop_and_wait(&svc, Duration::from_secs(20))?;
+        // 升级期间本机的显示器不能一直黑着（防窥），也不能多出一块虚拟显示器
+        crate::host::virtual_display::recover();
     }
     ask_tray_to_quit();
     wait_for_other_instances(Duration::from_secs(8), service);

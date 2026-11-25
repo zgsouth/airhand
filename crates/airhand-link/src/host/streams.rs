@@ -262,6 +262,7 @@ pub(crate) fn request(m: ControllerMsg) -> Option<Request> {
         ControllerMsg::Clipboard { text } => Request::Clipboard(text),
         ControllerMsg::Audio { enabled } => Request::Audio(enabled),
         ControllerMsg::Mic { enabled } => Request::Mic(enabled),
+        ControllerMsg::Privacy { on } => Request::Privacy(on),
         // 直连的回答交给直连任务，剪贴板里的文件交给 Files（都在读任务里）
         ControllerMsg::Direct(_) | ControllerMsg::Files(_) => return None,
     })
@@ -314,6 +315,8 @@ pub struct Admitted {
     pub audio: bool,
     /// 开始时看哪几个显示器（没检查过，见 [`super::resolve_view`]；空的是只看主显示器）
     pub view: Vec<StreamView>,
+    /// 开始时要不要防窥模式（见 `airhand_proto::session` 的"防窥模式"）
+    pub privacy: bool,
 }
 
 impl HostStreams {
@@ -355,6 +358,7 @@ impl HostStreams {
                 .into_iter()
                 .take(MAX_STREAMS as usize)
                 .collect(),
+            privacy: r.intro.privacy,
         };
         info!(
             session_id,
@@ -773,6 +777,10 @@ mod tests {
         assert_eq!(
             request(ControllerMsg::Mic { enabled: true }),
             Some(Request::Mic(true))
+        );
+        assert_eq!(
+            request(ControllerMsg::Privacy { on: false }),
+            Some(Request::Privacy(false))
         );
         let wild = QualitySettings {
             fps: 0,

@@ -65,6 +65,7 @@ function sessionHarness(connect?: (code: string, resume: any, opts: any) => Prom
         calls.push(
           c.cmd === "settings" ? [c.cmd, c.sid, c.settings]
           : c.cmd === "mic" ? [c.cmd, c.sid, c.enabled]
+          : c.cmd === "privacy" ? [c.cmd, c.sid, c.on]
           : c.cmd === "view" ? [c.cmd, c.sid, plain(c.streams)]
           : [c.cmd, c.sid],
         );
@@ -597,6 +598,44 @@ test("麦克风：对方说了能接、开关打开、正在查看时才告诉�
   s.micState = "unsupported";
   s.syncMic();
   assert.equal(mics().length, sent);
+});
+
+test("防窥模式：对方说了状态才能开；打开时先显示正在打开；开着时重连在连接选项里带上；对方说没能打开就关掉", async () => {
+  let opts: any;
+  const h = sessionHarness(async (_code, _resume, o) => {
+    opts = o;
+    return granted;
+  });
+  const s = h.session;
+  Object.assign(s, { privacyWanted: false, privacyState: null, privacyDetail: null });
+  await s.start();
+  assert.equal(opts.privacy, false);
+  const sent = () => h.calls.filter((c) => Array.isArray(c) && c[0] === "privacy");
+
+  // 对方还没说（不是 Windows、版本旧）：不发
+  s.setPrivacy(true);
+  assert.deepEqual(sent(), []);
+  h.event({ type: "privacy", state: "off", detail: null });
+  assert.equal(s.privacyWanted, false);
+
+  s.setPrivacy(true);
+  assert.deepEqual(sent(), [["privacy", 7, true]]);
+  assert.equal(s.privacyState, "starting");
+  h.event({ type: "privacy", state: "on", detail: null });
+  assert.equal(s.privacyWanted, true);
+
+  // 断线重连：在握手里就告诉对方接着开着，状态等对方重新说
+  await s.start();
+  assert.equal(opts.privacy, true);
+  assert.equal(s.privacyState, null);
+  assert.equal(sent().length, 1, "重连不另外发命令");
+
+  // 对方没能打开（已经恢复原样）：关掉，下次重连不再要
+  h.event({ type: "privacy", state: "failed", detail: "the virtual display didn't show up" });
+  assert.equal(s.privacyWanted, false);
+  assert.equal(s.privacyDetail, "the virtual display didn't show up");
+  await s.start();
+  assert.equal(opts.privacy, false);
 });
 
 test("stale completion cannot finish a newer attempt", () => {
