@@ -34,11 +34,11 @@ on:
       windows:
         description: 构建 Windows 安装包
         type: boolean
-        default: true
+        default: false
       macos:
         description: 构建 macOS（Apple Silicon）
         type: boolean
-        default: true
+        default: false
       android:
         description: 构建 Android APK
         type: boolean
@@ -46,7 +46,7 @@ on:
       ios:
         description: 构建 iOS（未签名 ipa）
         type: boolean
-        default: false
+        default: true
   push:
     tags:
       - "v*"
