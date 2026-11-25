@@ -4,10 +4,11 @@
 #   AIRHAND_SERVER      形如 192.168.110.176:4433 或 www.example.com:4433（不要带 http://，不要加引号）
 #   AIRHAND_SERVER_FP   64 位十六进制指纹（服务器日志里打印的那串，冒号可留可去）
 #
-# 触发：Actions → 左侧 build-airhand → Run workflow
-# 产物：运行页底部的 Artifacts（airhand-windows / airhand-macos）
+# 触发：Actions → 左侧 build-airhand → Run workflow（构建默认分支，当前是 0.4.0）
+#      打 tag 推送时也会自动构建（构建的是那个 tag）
+# 产物：运行页底部的 Artifacts（airhand-windows / airhand-macos-arm64）
 #
-# 版本说明（2026-11 逐个打开 action.yml 核对的 runs.using，不是看版本号猜的）：
+# 版本说明（2026-11-25 逐个打开 action.yml 核对的 runs.using，不是看版本号猜的）：
 #   actions/checkout@v7        node24
 #   actions/setup-node@v7      node24
 #   actions/upload-artifact@v7 node24（v6 及更早仍是 node20，别降级）
@@ -15,7 +16,8 @@
 #   dtolnay/rust-toolchain     composite，无 node 运行时
 #
 # runner 一律用 -latest：写死版本号会像 macos-14 那样到期直接失效。
-# 若 macOS 26 上构建异常，把 macos-latest 换成 macos-15（仍受支持的固定 arm64 版）。
+# macOS 只出 Apple Silicon（arm64）包，不再构建 Intel / universal 版本。
+# 若某天 macos-latest 上构建异常，换成 macos-15（同为 arm64）即可。
 
 name: build-airhand
 
@@ -90,6 +92,7 @@ jobs:
           if-no-files-found: error
 
   macos:
+    # macos-latest 与 macos-15 都是 arm64，编出来的就是 Apple Silicon 原生包
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -116,9 +119,8 @@ jobs:
           cache: npm
           cache-dependency-path: client/package-lock.json
 
+      # 不再装 x86_64-apple-darwin：只编 runner 自己的架构（arm64）
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -131,14 +133,14 @@ jobs:
         working-directory: client
         run: npm ci
 
-      - name: 编译通用包
+      - name: 编译 Apple Silicon 包
         working-directory: client
-        run: npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
+        run: npm run tauri build -- --bundles app,dmg
 
       - uses: actions/upload-artifact@v7
         with:
-          name: airhand-macos
+          name: airhand-macos-arm64
           path: |
-            client/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-            client/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+            client/src-tauri/target/release/bundle/dmg/*.dmg
+            client/src-tauri/target/release/bundle/macos/*.app
           if-no-files-found: error
