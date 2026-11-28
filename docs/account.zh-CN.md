@@ -85,6 +85,24 @@ iOS 是原生 SwiftUI，不加载 `client/` 那套 React 界面，所以账号�
 地址来源和桌面端一样：先读 `account.json` 里手填过的，其次构建时写进 Info.plist 的 `AirhandAccountAPI`
 （`scripts/build-ipa.sh` 从环境变量 `AIRHAND_ACCOUNT_API` 传进 xcodebuild）。
 
+## 桌面端的 CSP（最容易漏的一条）
+
+`client/src-tauri/tauri.conf.json` 里的 `connect-src` 原本只放行了自己、IPC 和 `ws://127.0.0.1:*`，
+**没有任何 http 地址**。Tauri 的窗口加载了这份 CSP，所以请求在发出去之前就被 WebView 掐掉：
+
+```
+Refused to connect ... violates Content Security Policy directive "connect-src ..."
+```
+
+`fetch` 只会抛一个 `TypeError`，前端显示「连不上账号服务」，而服务端日志干干净净——
+和第 3 条的样子一模一样，但原因完全不同。现在 `connect-src` 末尾加了 `http: https:`。
+
+为什么是通配而不是写死地址：账号服务地址可以在登录页里手填（内网换 IP 不用重新打包），
+构建期根本不知道最终会连哪个 host。代价是这个窗口可以请求任意 http/https 地址——
+对一个自托管的远控工具来说可以接受，但别在里面加载第三方网页。
+
+网页控制台（浏览器打开）不受这条影响，`index.html` 里没有 CSP meta。
+
 ## 明文 HTTP 的三个坑
 
 账号服务一般跑在内网，`http://` 就够了，但系统会拦：

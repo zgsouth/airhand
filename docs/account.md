@@ -89,6 +89,27 @@ register, and the UI says "start sharing on the Share tab once".
 The address works like the desktop: `account.json` first, then `AirhandAccountAPI` baked into Info.plist at build time
 (`scripts/build-ipa.sh` passes `AIRHAND_ACCOUNT_API` to xcodebuild).
 
+## The desktop CSP (the one that's easy to miss)
+
+`connect-src` in `client/src-tauri/tauri.conf.json` used to allow only self, IPC and `ws://127.0.0.1:*` —
+**no http address at all**. The Tauri window loads that policy, so the request is killed by the webview
+before it leaves the app:
+
+```
+Refused to connect ... violates Content Security Policy directive "connect-src ..."
+```
+
+`fetch` just throws a `TypeError`, the UI says "can't reach the account server", and the server log stays
+empty — identical to gotcha 3 below, but a completely different cause. `connect-src` now ends with
+`http: https:`.
+
+It's a wildcard rather than a fixed address because the account server address is editable in the login
+page (so a LAN IP change doesn't need a rebuild) and the build can't know the host. The trade-off is that
+this window may request any http/https URL — fine for a self-hosted remote-control tool, but don't load
+third-party pages in it.
+
+The browser console is unaffected; `index.html` has no CSP meta tag.
+
 ## Three plain-HTTP gotchas
 
 The account server usually lives on a LAN, so `http://` is fine — but the OS may block it:
