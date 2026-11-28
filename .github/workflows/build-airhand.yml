@@ -1,8 +1,32 @@
 # 放到你仓库的 .github/workflows/build-airhand.yml
 #
-# 前提：仓库 Settings → Secrets and variables → Actions → Repository secrets 里有两个：
-#   AIRHAND_SERVER      形如 192.168.110.176:4433 或 www.example.com:4433（不要带 http://，不要加引号）
-#   AIRHAND_SERVER_FP   64 位十六进制指纹（服务器日志里打印的那串，冒号可留可去）
+# 前提：仓库 Settings → Secrets and variables → Actions → Repository secrets 里有四个：
+#   AIRHAND_SERVER        形如 192.168.110.176:4433 或 www.example.com:4433（不要带 http://，不要加引号）
+#   AIRHAND_SERVER_FP     64 位十六进制指纹（服务器日志里打印的那串，冒号可留可去）
+#   AIRHAND_ACCOUNT_API   account-api 的地址，形如 http://192.168.110.176:8080
+#                         规则：必须带 http:// 或 https://，只写 host:port，不要结尾斜杠、不要带路径
+#                         只有 windows / macos 两个 job 强制要求（见下面说明），缺了会直接失败
+#   AIRHAND_ACCOUNT_USER  可选，登录页预填的用户名（只预填用户名，密码永远不烧进客户端）
+#
+# 关于 account-api 地址是怎么进到客户端里的：
+#   workflow 把 AIRHAND_ACCOUNT_API 作为**构建期环境变量**注入，四个平台的构建步骤都能读到。
+#
+#   • Windows / macOS / 网页控制台（client/ 里的 React + Tauri）：已经接好，不用再改代码。
+#       构建时注 VITE_AIRHAND_ACCOUNT_API，client/src/lib/account.ts 里用
+#       import.meta.env.VITE_AIRHAND_ACCOUNT_API 读它当登录页的默认服务器地址；
+#       用户在登录页里改过的地址存在 localStorage，优先于这个默认值。
+#       所以这两个平台的 job 里 secret 缺失 = 直接失败（避免产出一个连不上账号服务的包）。
+#
+#   • Android（android/）和 iOS（ios/）是**原生 Kotlin / Swift，没有 WebView**，
+#       不加载 client/ 的 React 界面，所以它们暂时**不消费** AIRHAND_ACCOUNT_API：
+#       APK / IPA 里没有账号登录页，连接方式和改造前一样（控制码 + 中继）。
+#       这两个 job 只在这个 secret 缺失时给 warning，不会因此失败。
+#       要给手机端也加登录，得在 Kotlin / Swift 里各写一套界面和 HTTP 客户端，并且注意：
+#         - Android 9+ 禁止明文 HTTP：AndroidManifest 的 <application> 要加
+#           android:usesCleartextTraffic="true"，否则 http:// 内网地址请求直接失败；
+#         - iOS 的 ATS 同理：Info.plist（由 ios/project.yml 生成）要加
+#           NSAppTransportSecurity → NSAllowsLocalNetworking = true。
+#       这两条不加的话现象是「客户端报网络错误、服务端日志干干净净」，最难查。
 #
 # 触发：
 #   • Actions → 左侧 build-airhand → Run workflow
@@ -57,6 +81,13 @@ permissions:
 env:
   AIRHAND_SERVER: ${{ secrets.AIRHAND_SERVER }}
   AIRHAND_SERVER_FP: ${{ secrets.AIRHAND_SERVER_FP }}
+  # account-api 地址：构建期烧进客户端，运行期不再需要配置
+  AIRHAND_ACCOUNT_API: ${{ secrets.AIRHAND_ACCOUNT_API }}
+  # 同一个值再以 VITE_ 前缀导出一次，给前端（Vite）用
+  VITE_AIRHAND_ACCOUNT_API: ${{ secrets.AIRHAND_ACCOUNT_API }}
+  # 登录页预填的用户名，可以为空
+  AIRHAND_ACCOUNT_USER: ${{ secrets.AIRHAND_ACCOUNT_USER }}
+  VITE_AIRHAND_ACCOUNT_USER: ${{ secrets.AIRHAND_ACCOUNT_USER }}
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -73,6 +104,7 @@ jobs:
         env:
           S: ${{ secrets.AIRHAND_SERVER }}
           F: ${{ secrets.AIRHAND_SERVER_FP }}
+          A: ${{ secrets.AIRHAND_ACCOUNT_API }}
         run: |
           if [ -z "$S" ] || [ -z "$F" ]; then
             echo "::error::缺少 AIRHAND_SERVER 或 AIRHAND_SERVER_FP secret"
@@ -85,7 +117,19 @@ jobs:
           case "$S" in
             http*://*) echo "::error::AIRHAND_SERVER 只写 host:port，不要带协议前缀"; exit 1 ;;
           esac
+          if [ -z "$A" ]; then
+            echo "::error::缺少 AIRHAND_ACCOUNT_API secret（形如 http://192.168.110.176:8080）"
+            exit 1
+          fi
+          if ! printf '%s' "$A" | grep -Eq '^https?://[^/]+$'; then
+            echo "::error::AIRHAND_ACCOUNT_API 必须是 http(s)://host:port，不能以 / 结尾、不能带路径"
+            exit 1
+          fi
+          case "$A" in
+            http://*) echo "::warning::AIRHAND_ACCOUNT_API 是明文 HTTP，仅适用于内网自用" ;;
+          esac
           echo "中继地址：$S（指纹格式校验通过）"
+          echo "账号服务：$A"
 
       # Node 20 已于 2026-04 EOL，runner 上的 node20 运行时也在 2026-09 移除
       - uses: actions/setup-node@v7
@@ -107,8 +151,14 @@ jobs:
         working-directory: client
         run: npm ci
 
+      # AIRHAND_ACCOUNT_API / VITE_AIRHAND_ACCOUNT_API 已在 workflow 级 env 里，
+      # 这里再显式写一遍，方便看清哪些变量会进最终产物
       - name: 编译
         working-directory: client
+        env:
+          AIRHAND_ACCOUNT_API: ${{ env.AIRHAND_ACCOUNT_API }}
+          VITE_AIRHAND_ACCOUNT_API: ${{ env.VITE_AIRHAND_ACCOUNT_API }}
+          VITE_AIRHAND_ACCOUNT_USER: ${{ env.VITE_AIRHAND_ACCOUNT_USER }}
         run: npm run tauri build
 
       - uses: actions/upload-artifact@v7
@@ -129,6 +179,7 @@ jobs:
         env:
           S: ${{ secrets.AIRHAND_SERVER }}
           F: ${{ secrets.AIRHAND_SERVER_FP }}
+          A: ${{ secrets.AIRHAND_ACCOUNT_API }}
         run: |
           if [ -z "$S" ] || [ -z "$F" ]; then
             echo "::error::缺少 AIRHAND_SERVER 或 AIRHAND_SERVER_FP secret"
@@ -138,8 +189,16 @@ jobs:
             echo "::error::AIRHAND_SERVER_FP 不是 64 位十六进制"
             exit 1
           fi
+          if [ -z "$A" ]; then
+            echo "::error::缺少 AIRHAND_ACCOUNT_API secret（形如 http://192.168.110.176:8080）"
+            exit 1
+          fi
+          if ! printf '%s' "$A" | grep -Eq '^https?://[^/]+$'; then
+            echo "::error::AIRHAND_ACCOUNT_API 必须是 http(s)://host:port，不能以 / 结尾、不能带路径"
+            exit 1
+          fi
           echo "中继地址：$S（指纹格式校验通过）"
-
+          echo "账号服务：$A"
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -162,6 +221,10 @@ jobs:
 
       - name: 编译 Apple Silicon 包
         working-directory: client
+        env:
+          AIRHAND_ACCOUNT_API: ${{ env.AIRHAND_ACCOUNT_API }}
+          VITE_AIRHAND_ACCOUNT_API: ${{ env.VITE_AIRHAND_ACCOUNT_API }}
+          VITE_AIRHAND_ACCOUNT_USER: ${{ env.VITE_AIRHAND_ACCOUNT_USER }}
         run: npm run tauri build -- --bundles app,dmg
 
       - uses: actions/upload-artifact@v7
@@ -180,11 +243,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Android 是原生界面，还不消费 AIRHAND_ACCOUNT_API，所以缺了只提示不拦
       - name: 校验 secret
         shell: bash
         env:
           S: ${{ secrets.AIRHAND_SERVER }}
           F: ${{ secrets.AIRHAND_SERVER_FP }}
+          A: ${{ secrets.AIRHAND_ACCOUNT_API }}
         run: |
           if [ -z "$S" ] || [ -z "$F" ]; then
             echo "::error::缺少 AIRHAND_SERVER 或 AIRHAND_SERVER_FP 这两个 secret"
@@ -195,7 +260,13 @@ jobs:
             exit 1
           fi
           echo "中继地址：$S（指纹格式校验通过）"
-
+          if [ -z "$A" ]; then
+            echo "::warning::没有 AIRHAND_ACCOUNT_API：Android 端本来也没接账号登录，APK 功能不受影响"
+          elif ! printf '%s' "$A" | grep -Eq '^https?://[^/]+$'; then
+            echo "::warning::AIRHAND_ACCOUNT_API 格式不像 http(s)://host:port（$A），先忽略"
+          else
+            echo "账号服务：$A（Android 原生端尚未接入，仅记录）"
+          fi
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -213,12 +284,17 @@ jobs:
         run: |
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
             "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" > /dev/null
-
       - uses: gradle/actions/setup-gradle@v6
 
+      # AIRHAND_ACCOUNT_API 这里照旧导出，但 Kotlin 侧还没有代码读它（原生界面没接账号登录）；
+      # 以后接入时在 android/app/build.gradle.kts 里
+      #   buildConfigField("String", "ACCOUNT_API", "\"${System.getenv("AIRHAND_ACCOUNT_API") ?: ""}\"")
       # Kotlin 在 Gradle 进程内编译：CI 只构建一次，没必要单开 Kotlin 守护进程
       - name: 编译 APK
         working-directory: android
+        env:
+          AIRHAND_ACCOUNT_API: ${{ env.AIRHAND_ACCOUNT_API }}
+          AIRHAND_ACCOUNT_USER: ${{ env.AIRHAND_ACCOUNT_USER }}
         run: ./gradlew assembleRelease -Pkotlin.compiler.execution.strategy=in-process
 
       - uses: actions/upload-artifact@v7
@@ -236,11 +312,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # iOS 同样是原生界面，还不消费 AIRHAND_ACCOUNT_API，所以缺了只提示不拦
       - name: 校验 secret
         shell: bash
         env:
           S: ${{ secrets.AIRHAND_SERVER }}
           F: ${{ secrets.AIRHAND_SERVER_FP }}
+          A: ${{ secrets.AIRHAND_ACCOUNT_API }}
         run: |
           if [ -z "$S" ] || [ -z "$F" ]; then
             echo "::error::缺少 AIRHAND_SERVER 或 AIRHAND_SERVER_FP 这两个 secret"
@@ -251,14 +329,19 @@ jobs:
             exit 1
           fi
           echo "中继地址：$S（指纹格式校验通过）"
-
+          if [ -z "$A" ]; then
+            echo "::warning::没有 AIRHAND_ACCOUNT_API：iOS 端本来也没接账号登录，IPA 功能不受影响"
+          elif ! printf '%s' "$A" | grep -Eq '^https?://[^/]+$'; then
+            echo "::warning::AIRHAND_ACCOUNT_API 格式不像 http(s)://host:port（$A），先忽略"
+          else
+            echo "账号服务：$A（iOS 原生端尚未接入，仅记录）"
+          fi
       - name: 选择 Xcode
         run: |
           if [ -n "${XCODE_VERSION:-}" ]; then
             sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app"
           fi
           xcodebuild -version
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios
@@ -267,7 +350,12 @@ jobs:
         run: brew install xcodegen
 
       # 不设 TEAM_ID：产出 ad-hoc 签名的 IPA，安装前要自己重签（见 docs/ios.md）
+      # build-ipa.sh 从环境变量读取 AIRHAND_ACCOUNT_API，写进 Info.plist 的 AirhandAccountAPI 键，
+      # 并在 Info.plist 里带上 ATS 例外，否则 http:// 会被系统拦截
       - name: 编译 IPA
+        env:
+          AIRHAND_ACCOUNT_API: ${{ env.AIRHAND_ACCOUNT_API }}
+          AIRHAND_ACCOUNT_USER: ${{ env.AIRHAND_ACCOUNT_USER }}
         run: ios/scripts/build-ipa.sh
 
       - uses: actions/upload-artifact@v7
