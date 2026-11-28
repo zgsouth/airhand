@@ -18,6 +18,9 @@ struct AirhandApp: App {
             app.controller.setForeground(p == .active)
             app.session?.setBackground(p == .background)
             if p == .active { app.hostLive = HostLive.load() }
+            // 账号同步只在用得着的时候跑：回到前台立刻拉一次，退到后台就停，省电
+            if p == .active, app.account.signedIn { app.account.startSync() }
+            if p == .background { app.account.stopSync() }
             // 切到别的应用一会儿（复制个东西）再回来，会话不断：系统给的后台时间里连接保持着
             if p == .background, app.session != nil {
                 BackgroundTask.begin()

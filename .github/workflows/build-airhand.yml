@@ -17,16 +17,18 @@
 #       用户在登录页里改过的地址存在 localStorage，优先于这个默认值。
 #       所以这两个平台的 job 里 secret 缺失 = 直接失败（避免产出一个连不上账号服务的包）。
 #
-#   • Android（android/）和 iOS（ios/）是**原生 Kotlin / Swift，没有 WebView**，
-#       不加载 client/ 的 React 界面，所以它们暂时**不消费** AIRHAND_ACCOUNT_API：
-#       APK / IPA 里没有账号登录页，连接方式和改造前一样（控制码 + 中继）。
-#       这两个 job 只在这个 secret 缺失时给 warning，不会因此失败。
-#       要给手机端也加登录，得在 Kotlin / Swift 里各写一套界面和 HTTP 客户端，并且注意：
-#         - Android 9+ 禁止明文 HTTP：AndroidManifest 的 <application> 要加
-#           android:usesCleartextTraffic="true"，否则 http:// 内网地址请求直接失败；
-#         - iOS 的 ATS 同理：Info.plist（由 ios/project.yml 生成）要加
-#           NSAppTransportSecurity → NSAllowsLocalNetworking = true。
-#       这两条不加的话现象是「客户端报网络错误、服务端日志干干净净」，最难查。
+#   • iOS（ios/）是**原生 SwiftUI，没有 WebView**，不加载 client/ 那套 React 界面，
+#       所以账号是另写的一套（ios/Airhand/Core/Account.swift + UI/AccountSection.swift）：
+#       build-ipa.sh 把 AIRHAND_ACCOUNT_API 传给 xcodebuild，写进 Info.plist 的 AirhandAccountAPI，
+#       登录页用它当默认地址，用户可以在界面上改（存 App Group 的 account.json）。
+#       secret 缺失只给 warning：IPA 照样能用，只是登录页里要手填地址。
+#       明文 HTTP 的坑已经在 ios/project.yml 里处理了（ATS 整体放开，因为例外域名填不了 IP）。
+#
+#   • Android（android/）还是**原生 Kotlin，没有 WebView**，暂未接入账号：
+#       APK 里没有登录页，连接方式还是控制码 + 中继。这个 job 在 secret 缺失时只给 warning。
+#       以后接入时注意 Android 9+ 禁止明文 HTTP：AndroidManifest 的 <application> 要加
+#       android:usesCleartextTraffic="true"，否则 http:// 内网地址请求直接失败
+#       （现象是「客户端报网络错误、服务端日志干干净净」，最难查）。
 #
 # 触发：
 #   • Actions → 左侧 build-airhand → Run workflow
@@ -261,7 +263,7 @@ jobs:
           fi
           echo "中继地址：$S（指纹格式校验通过）"
           if [ -z "$A" ]; then
-            echo "::warning::没有 AIRHAND_ACCOUNT_API：Android 端本来也没接账号登录，APK 功能不受影响"
+            echo "::warning::没有 AIRHAND_ACCOUNT_API：Android 还没接账号登录，APK 功能不受影响"
           elif ! printf '%s' "$A" | grep -Eq '^https?://[^/]+$'; then
             echo "::warning::AIRHAND_ACCOUNT_API 格式不像 http(s)://host:port（$A），先忽略"
           else
@@ -312,7 +314,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # iOS 同样是原生界面，还不消费 AIRHAND_ACCOUNT_API，所以缺了只提示不拦
+      # iOS 也接了账号（原生 SwiftUI 那套），但缺这个 secret 只是登录页要手填地址，不拦构建
       - name: 校验 secret
         shell: bash
         env:
@@ -330,11 +332,11 @@ jobs:
           fi
           echo "中继地址：$S（指纹格式校验通过）"
           if [ -z "$A" ]; then
-            echo "::warning::没有 AIRHAND_ACCOUNT_API：iOS 端本来也没接账号登录，IPA 功能不受影响"
+            echo "::warning::没有 AIRHAND_ACCOUNT_API：IPA 照样能装，只是登录页里要手填账号服务地址"
           elif ! printf '%s' "$A" | grep -Eq '^https?://[^/]+$'; then
             echo "::warning::AIRHAND_ACCOUNT_API 格式不像 http(s)://host:port（$A），先忽略"
           else
-            echo "账号服务：$A（iOS 原生端尚未接入，仅记录）"
+            echo "账号服务：$A（写进 Info.plist 的 AirhandAccountAPI）"
           fi
       - name: 选择 Xcode
         run: |

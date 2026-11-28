@@ -64,12 +64,36 @@ Airhand 要求配对码时界面会让你输。
 所以这两台上"本机登记"要等切回被控端模式之后才会成功；Windows 上被控端一直跑着（系统服务或本进程），没有这个问题。
 界面上会显示"这台电脑还没登记到账号"，旁边有"重新登记"。
 
-## 明文 HTTP 的两个坑
+### iOS（原生界面）
+
+iOS 是原生 SwiftUI，不加载 `client/` 那套 React 界面，所以账号是另写的一套：
+
+| 文件 | 作用 |
+|---|---|
+| `ios/Airhand/Core/Account.swift` | account-api 客户端（`URLSession`）+ `@Observable` 的 `Account`：登录、token、设备列表、取配对码、登记本机、45 秒同步 |
+| `ios/Airhand/UI/AccountSection.swift` | 首页里"账号"那一块：没登录是登录卡片，登录后是账号设备列表（在"我的设备"上面） |
+| `ios/Shared/SharedStore.swift` | `BuildDefaults.accountAPI` 读 Info.plist 里的 `AirhandAccountAPI` |
+| `ios/Airhand/Core/AppModel.swift`、`App.swift` | 启动时若已登录就开始同步；回前台拉一次，退后台停掉 |
+
+登录状态存在 App Group 里的 `account.json`（服务器地址、token、用户名、本机 uuid），和"我的设备"分开。
+
+**本机登记**：控制码优先取正在共享时的实时值，没在共享就用上次存下的（`SavedHostCode`），
+所以手机即使没在共享也能被别的设备看到，只是显示离线。配对码只在共享过之后才有
+（广播扩展把 Rust 生成的配对码写进 `pairing.json`）——从没共享过的手机登记不上，
+界面会提示"先到共享本机开始共享一次"。
+
+地址来源和桌面端一样：先读 `account.json` 里手填过的，其次构建时写进 Info.plist 的 `AirhandAccountAPI`
+（`scripts/build-ipa.sh` 从环境变量 `AIRHAND_ACCOUNT_API` 传进 xcodebuild）。
+
+## 明文 HTTP 的三个坑
 
 账号服务一般跑在内网，`http://` 就够了，但系统会拦：
 
 - **Android 9+**：`AndroidManifest.xml` 的 `<application>` 上要 `android:usesCleartextTraffic="true"`
-- **iOS**：`Info.plist` 要 ATS 例外（`NSAllowsLocalNetworking` 或 `NSAllowsArbitraryLoads`）
+  （Android 端还没接账号，加的时候一并加）
+- **iOS**：`Info.plist` 要 ATS 例外。`ios/project.yml` 里已经设了 `NSAppTransportSecurity →
+  NSAllowsArbitraryLoads = true`——例外域名（`NSExceptionDomains`）填不了 IP，而账号服务就是
+  `http://192.168.x.x:8080`，所以只能整体放开。想收紧就改成只走 https，或者给账号服务挂个域名
 - **CORS**：客户端是从 `tauri://localhost` 发请求的，`account-api` 里已经放开了 `Access-Control-Allow-Origin`
   （只用 Bearer token、不用 cookie，所以放开 `*` 是安全的）
 

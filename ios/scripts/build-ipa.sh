@@ -18,7 +18,9 @@ XCODEGEN="$(command -v xcodegen || echo "$HOME/airhand-ios-setup/xcodegen/bin/xc
 
 SERVER="${AIRHAND_SERVER:-}"
 FP="${AIRHAND_SERVER_FP:-}"
+ACCOUNT="${AIRHAND_ACCOUNT_API:-}"
 [ -z "$SERVER" ] && echo "提示：没有设置 AIRHAND_SERVER，安装后要在“设置”里填服务器地址" >&2
+[ -z "$ACCOUNT" ] && echo "提示：没有设置 AIRHAND_ACCOUNT_API，安装后要在登录页填账号服务地址（形如 http://192.168.110.176:8080）" >&2
 
 # Rust 核心（真机）
 scripts/build-rust.sh iphoneos release
@@ -29,7 +31,7 @@ if [ -n "${TEAM_ID:-}" ]; then
   xcodebuild -project Airhand.xcodeproj -scheme Airhand -configuration Release -sdk iphoneos \
     -destination 'generic/platform=iOS' -archivePath build/Airhand.xcarchive \
     DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic CODE_SIGN_IDENTITY="Apple Development" \
-    AIRHAND_SERVER="$SERVER" AIRHAND_SERVER_FP="$FP" -allowProvisioningUpdates archive 2>&1 | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)"
+    AIRHAND_SERVER="$SERVER" AIRHAND_SERVER_FP="$FP" AIRHAND_ACCOUNT_API="$ACCOUNT" -allowProvisioningUpdates archive 2>&1 | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)"
   cat > build/ExportOptions.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -49,7 +51,7 @@ rm -rf build/dd-release build/Payload build/Airhand.ipa
 xcodebuild -project Airhand.xcodeproj -scheme Airhand -configuration Release -sdk iphoneos \
   -destination 'generic/platform=iOS' -derivedDataPath build/dd-release \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-  AIRHAND_SERVER="$SERVER" AIRHAND_SERVER_FP="$FP" build 2>&1 | grep -E "error:|BUILD (SUCCEEDED|FAILED)"
+  AIRHAND_SERVER="$SERVER" AIRHAND_SERVER_FP="$FP" AIRHAND_ACCOUNT_API="$ACCOUNT" build 2>&1 | grep -E "error:|BUILD (SUCCEEDED|FAILED)"
 
 APP=build/dd-release/Build/Products/Release-iphoneos/Airhand.app
 mkdir -p build/Payload

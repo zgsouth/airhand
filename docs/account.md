@@ -67,12 +67,37 @@ tray-only, so there is a new Rust command `host_identity` (`src-tauri/src/lib.rs
 console is open, so registering this computer only succeeds after switching back to host mode. On Windows the host always
 runs (service or in-process), so it works directly. The UI says "this computer isn't registered yet" with a retry button.
 
-## Two plain-HTTP gotchas
+### iOS (native UI)
+
+iOS is native SwiftUI and does not load the React console, so it has its own implementation:
+
+| File | What it does |
+|---|---|
+| `ios/Airhand/Core/Account.swift` | account-api client (`URLSession`) plus an `@Observable` `Account`: sign-in, token, device list, credential fetch, self-registration, 45 s sync |
+| `ios/Airhand/UI/AccountSection.swift` | the "Account" block on the home tab: a sign-in card, then the account device list above "My devices" |
+| `ios/Shared/SharedStore.swift` | `BuildDefaults.accountAPI` reads `AirhandAccountAPI` from Info.plist |
+| `ios/Airhand/Core/AppModel.swift`, `App.swift` | starts syncing when already signed in; refreshes on foreground, stops in background |
+
+Login state lives in `account.json` inside the App Group (server address, token, username, this device's uuid), separate
+from "My devices".
+
+**Self-registration**: the control code comes from the live host when sharing, otherwise from the saved one
+(`SavedHostCode`), so a phone that isn't sharing still shows up for other devices — just as offline. The pairing code only
+exists after sharing once (the broadcast extension writes it into `pairing.json`); a phone that never shared can't
+register, and the UI says "start sharing on the Share tab once".
+
+The address works like the desktop: `account.json` first, then `AirhandAccountAPI` baked into Info.plist at build time
+(`scripts/build-ipa.sh` passes `AIRHAND_ACCOUNT_API` to xcodebuild).
+
+## Three plain-HTTP gotchas
 
 The account server usually lives on a LAN, so `http://` is fine — but the OS may block it:
 
 - **Android 9+**: add `android:usesCleartextTraffic="true"` to `<application>` in `AndroidManifest.xml`
-- **iOS**: an ATS exception in `Info.plist` (`NSAllowsLocalNetworking` or `NSAllowsArbitraryLoads`)
+  (Android doesn't have accounts yet; add it together with that work)
+- **iOS**: an ATS exception in `Info.plist`. `ios/project.yml` sets `NSAppTransportSecurity →
+  NSAllowsArbitraryLoads = true`, because exception domains (`NSExceptionDomains`) can't hold an IP and the account
+  server *is* `http://192.168.x.x:8080`. Tighten it by serving https or giving the server a hostname
 - **CORS**: requests come from `tauri://localhost`; `account-api` already sends `Access-Control-Allow-Origin`
   (token-only auth, no cookies, so `*` is fine)
 

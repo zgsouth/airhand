@@ -22,6 +22,7 @@ struct ConnectView: View {
                         liveCard(s)
                     }
                     codeCard
+                    AccountSection(app: app)
                     devices
                 }
                 .padding(.horizontal, 20)

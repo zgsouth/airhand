@@ -110,10 +110,12 @@ struct AppSettings: Codable, Equatable {
     }
 }
 
-/// 编译时写进 Info.plist 的默认服务器（AIRHAND_SERVER / AIRHAND_SERVER_FP）
+/// 编译时写进 Info.plist 的默认服务器（AIRHAND_SERVER / AIRHAND_SERVER_FP）和账号服务地址（AIRHAND_ACCOUNT_API）
 enum BuildDefaults {
     static var server: String { plist("AirhandServer") }
     static var fingerprint: String { plist("AirhandServerFingerprint") }
+    /// account-api 的地址（登录页预填用；用户可以在登录页里改，改完存在 account.json）
+    static var accountAPI: String { plist("AirhandAccountAPI") }
 
     private static func plist(_ k: String) -> String {
         let v = (Bundle.main.object(forInfoDictionaryKey: k) as? String) ?? ""

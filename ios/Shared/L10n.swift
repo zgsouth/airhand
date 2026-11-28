@@ -185,6 +185,20 @@ enum L {
         "problem_host_ended": "对方结束了会话", "problem_host_unresponsive": "对方无响应", "problem_kicked": "对方断开了你的连接",
         "problem_code_changed": "对方更换了控制码", "problem_session_ended": "会话已结束", "problem_no_session": "会话不存在",
         "problem_failed": "出错了：%@",
+        // 账号（account-api）
+        "account_title": "账号", "account_subtitle": "登录之后，同一账号下在线的设备会直接列在下面，点一下就能连。密码只在登录时用一次，不会存在本机。",
+        "account_user": "用户名", "account_password": "密码",
+        "account_sign_in": "登录", "account_signing_in": "登录中…", "account_sign_out": "退出登录",
+        "account_devices": "账号设备", "account_devices_empty": "这个账号下还没有别的设备上线",
+        "account_loading": "正在获取账号设备…", "account_online": "在线", "account_offline": "离线",
+        "account_server": "账号服务", "account_server_hint": "形如 http://192.168.110.176:8080，只写地址和端口，不要带路径",
+        "account_error_no_server": "还没有填账号服务的地址",
+        "account_error_network": "连不上账号服务：检查地址、网络，以及服务器是否开着",
+        "account_error_auth": "用户名或密码不对（登录已失效，请重新登录）",
+        "account_error_not_found": "服务器上没有这条记录",
+        "account_error_server": "账号服务出错了（HTTP %@）",
+        "account_self_no_host": "这台设备还没有控制码，先到“共享本机”开始共享，别的设备才看得到它",
+        "account_self_no_pairing": "这台设备还没有配对码，先到“共享本机”开始共享一次",
     ]
 
     // MARK: English
@@ -349,6 +363,20 @@ enum L {
         "problem_host_ended": "The remote ended the session", "problem_host_unresponsive": "The remote isn't responding", "problem_kicked": "The remote disconnected you",
         "problem_code_changed": "The remote changed its control code", "problem_session_ended": "The session ended", "problem_no_session": "No such session",
         "problem_failed": "Something went wrong: %@",
+        // Account (account-api)
+        "account_title": "Account", "account_subtitle": "Sign in and the other devices on this account show up below — one tap to connect. The password is only used to sign in and is never stored.",
+        "account_user": "Username", "account_password": "Password",
+        "account_sign_in": "Sign in", "account_signing_in": "Signing in…", "account_sign_out": "Sign out",
+        "account_devices": "Account devices", "account_devices_empty": "No other device on this account is online yet",
+        "account_loading": "Loading account devices…", "account_online": "online", "account_offline": "offline",
+        "account_server": "Account server", "account_server_hint": "Like http://192.168.110.176:8080 — address and port only, no path",
+        "account_error_no_server": "The account server address is empty",
+        "account_error_network": "Can't reach the account server: check the address, the network, and that the server is running",
+        "account_error_auth": "Wrong username or password (or the session expired — sign in again)",
+        "account_error_not_found": "The server has no such record",
+        "account_error_server": "The account server failed (HTTP %@)",
+        "account_self_no_host": "This device has no control code yet — start sharing on the Share tab so other devices can see it",
+        "account_self_no_pairing": "This device has no pairing code yet — start sharing on the Share tab once",
     ]
 }
 

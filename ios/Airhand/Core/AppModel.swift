@@ -13,6 +13,8 @@ final class AppModel {
 
     let devices = DeviceStore()
     let games = GameStore()
+    /// 账号（account-api）：登录状态、同账号的设备列表
+    let account = Account()
     @ObservationIgnored private(set) var controller: ControllerClient!
 
     /// 当前的远程会话（同一时间一个，和 Android 一样）
@@ -63,6 +65,8 @@ final class AppModel {
         })
         hostLive = HostLive.load()
         IPC.observe(IPC.hostLive) { [weak self] in self?.hostLive = HostLive.load() }
+        // 上次登录过：启动就开始同步（本机登记 + 同账号的设备列表）
+        if account.signedIn { account.startSync() }
         // 扩展被系统停掉时来不及说：隔一会儿看一下状态是不是太旧了
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             guard let self else { return }
