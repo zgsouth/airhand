@@ -260,12 +260,14 @@ export async function signIn(username: string, password: string, base: string): 
     throw err;
   }
   store.signedIn(username);
+  registeredPaused = null;
   startAccountSync();
 }
 
 /** 退出登录：断开会话、回到登录页（本机的"我的设备"不动） */
 export function signOut() {
   stopAccountSync();
+  registeredPaused = null;
   account.logout();
   store.signedOut();
 }
@@ -294,10 +296,18 @@ async function syncTick() {
   await refreshAccountDevices();
 }
 
+/** 这次运行里已经用"没在共享"的身份登记过的控制码（见 [registerThisDevice]） */
+let registeredPaused: string | null = null;
+
 /**
  * 把本机登记到账号：别的设备就能在这台电脑上线时看到它。
- * 控制码和配对码只在被控端连着服务器时才有——被控端没跑（例如 macOS 上正开着控制台）
- * 就先跳过，下一轮再试。
+ *
+ * 控制码和配对码在被控端跑着时来自状态，macOS 上开着控制台（被控端暂停）时来自
+ * config.toml 里存下来的那份，所以这台电脑不管在哪个模式都能登记上——否则控制台一打开就没身份可报，
+ * 关掉控制台时登记循环又跟着窗口一起没了，这台电脑永远进不了账号的列表。
+ *
+ * 没在共享时只登记一次：登记会刷新 last_seen，一直刷新别的设备就会以为这台一直在线，
+ * 其实那时候点它只会在中转服务器上等着（被控端停了）。登记一次让它出现在列表里、显示离线就够了。
  */
 export async function registerThisDevice(): Promise<void> {
   let id: account.HostIdentity | null = null;
@@ -310,14 +320,17 @@ export async function registerThisDevice(): Promise<void> {
     store.setAccount({ self: "hostOffline" });
     return;
   }
+  const code = String(id.code).padStart(6, "0");
+  if (!id.hosting && registeredPaused === code) return;
   try {
     await account.registerSelf({
       uuid: account.deviceUuid(),
       name: id.name || "Airhand",
-      controlCode: String(id.code).padStart(6, "0"),
+      controlCode: code,
       pairingCode: id.pairing,
     });
-    store.setAccount({ self: true });
+    registeredPaused = id.hosting ? null : code;
+    store.setAccount({ self: id.hosting ? true : "notHosting" });
   } catch (e) {
     store.setAccount({ self: account.toAccountError(e).message });
   }

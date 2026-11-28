@@ -130,3 +130,21 @@ All three fail as "network error" with nothing in the server log — check these
 - The token is self-signed with HMAC-SHA256 and has no expiry; rotating `TOKEN_SECRET` invalidates every client at once
 - Pairing codes are stored AES-256-GCM encrypted, and the list endpoint never returns them; rotating `DEVICE_SECRET`
   makes every stored code undecryptable (all devices must pair again). Back up both secrets with `account-data/`
+
+## When a device shows up in the list
+
+The list holds machines you can *connect to*, not machines that have signed in — a device needs a control code
+and a pairing code before it can be dialled.
+
+- **Desktop**: both are fixed and live in `config.toml` (`[code]`, and `pairing` under `[host]`). After signing in,
+  the console registers them every 45 seconds. On macOS / Linux the host pauses while the console is open (see
+  `HOST_WITH_CONSOLE` in `client/src-tauri/src/status.rs`), so the values come from the config file instead — the
+  computer still appears in the list, marked offline, and becomes connectable once you close the console (tapping it
+  waits instead of failing). While not hosting it registers only once: each register refreshes `last_seen`, and
+  refreshing forever would make other devices believe it is online.
+- **iOS**: the phone only has a control code after "Share this device" has run a broadcast at least once. A phone
+  that never shared has no identity to register, and the UI says so.
+
+Keep this in mind when touching the code: the desktop registration loop runs inside the console web page, and on
+macOS / Linux closing the console destroys that window (and the loop with it) — you cannot count on registering
+after the host comes up, only while the console is alive.

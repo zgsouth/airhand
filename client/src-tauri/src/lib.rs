@@ -603,7 +603,11 @@ async fn devices_save(
 /// 本机被控端的身份（控制台"把这台电脑加入账号"用，见 client/src/lib/account.ts）。
 ///
 /// 控制码和配对码本来只给托盘看（[`HostStatus`]），控制台要往账号服务登记本机就得知道它们。
-/// 被控端还没连上服务器时 `code` 是 `None`，配对码还不知道时 `pairing` 是 `None`。
+///
+/// 被控端正在跑时用状态里的那一份；没跑（macOS / Linux 上开着控制台，见
+/// [`status::HOST_WITH_CONSOLE`]）就用 config.toml 里存下来的那份——控制码和配对码都是固定的，
+/// 存下来的和被控端起来之后用的是同一个。没有这份兜底，控制台一打开就没有身份可报，
+/// 这台电脑永远登记不到账号上（关掉控制台时窗口已经销毁，登记循环也没了），别的设备就看不到它。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HostIdentity {
@@ -611,19 +615,32 @@ struct HostIdentity {
     pairing: Option<String>,
     /// 本机设备名（登记到账号服务时显示给别的设备看）
     name: String,
+    /// 被控端此刻真的在跑：`false` 表示这份身份是从配置里读出来的，别的设备看到的是离线，
+    /// 要等控制台关掉、被控端起来才连得上
+    hosting: bool,
 }
 
 #[tauri::command]
 async fn host_identity(state: tauri::State<'_, AppState>) -> Result<HostIdentity, Problem> {
-    let (code, pairing) = {
+    let (mut code, mut pairing) = {
         let st = state.hub.borrow();
         (st.host.code, st.host.pairing.clone())
     };
+    let hosting = code.is_some();
+    if code.is_none() {
+        code = config::settings().code().map(|c| c.code);
+    }
+    if pairing.is_none() {
+        let saved = config::host_security().pairing.code;
+        if !saved.is_empty() {
+            pairing = Some(saved);
+        }
+    }
     // sysinfo::host_identity 要读系统信息，别占着主线程
     let name = tauri::async_runtime::spawn_blocking(|| sysinfo::host_identity().0)
         .await
         .unwrap_or_default();
-    Ok(HostIdentity { code, pairing, name })
+    Ok(HostIdentity { code, pairing, name, hosting })
 }
 
 /// 控制台切换界面语言

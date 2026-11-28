@@ -24,8 +24,11 @@ export function AccountDevices({ disabled }: { disabled: boolean }) {
   /**
    * 本机还没登记上的原因（被控端没连上服务器之类）。
    * 网页版没有被控端，谈不上"登记本机"，不显示这一条。
+   * `notHosting` 不是失败：本机登记上了，只是此刻没在共享（macOS 开着控制台时被控端是停着的）。
    */
   const selfIssue = api.kind !== "web" && typeof acc.self === "string" ? acc.self : null;
+  const selfNotHosting = selfIssue === "notHosting";
+  const selfPending = selfIssue !== null && !selfNotHosting;
 
   return (
     <section className="nt-devices account-devices">
@@ -60,12 +63,19 @@ export function AccountDevices({ disabled }: { disabled: boolean }) {
       </div>
 
       {/* 本机还没登记上：说清楚为什么（别的电脑这时看不到这台） */}
-      {selfIssue && (
+      {selfPending && (
         <div className="acct-note muted small" role="status">
           <span>{t("accountDevices.selfPending")}</span>
           <button className="text-btn" onClick={() => void registerThisDevice()}>
             {t("accountDevices.retry")}
           </button>
+        </div>
+      )}
+
+      {/* 登记上了、但此刻没在共享：别的设备能看到这台，点了要等它上线 */}
+      {selfNotHosting && (
+        <div className="acct-note muted small" role="status">
+          <span>{t("accountDevices.selfNotHosting")}</span>
         </div>
       )}
 

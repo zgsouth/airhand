@@ -27,6 +27,7 @@ const en: Record<MsgKey, Msg> = {
   "accountDevices.empty": "No other devices on this account yet. A host shows up here once it signs in to the same account and comes online",
   "accountDevices.loading": "Loading devices…",
   "accountDevices.selfPending": "This computer isn't registered yet (the host isn't connected to the server)",
+  "accountDevices.selfNotHosting": "This computer is registered. It isn't hosting right now, so other devices can see it but can only connect once you close the console",
   "accountDevices.retry": "Register again",
   "accountDevices.thisDevice": "this one",
 

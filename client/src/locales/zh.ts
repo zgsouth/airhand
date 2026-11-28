@@ -27,6 +27,7 @@ export default {
   "accountDevices.empty": "这个账号下还没有别的设备。被控端登录同一账号并上线后会自动出现在这里",
   "accountDevices.loading": "正在读取设备列表…",
   "accountDevices.selfPending": "这台电脑还没登记到账号（被控端没连上服务器）",
+  "accountDevices.selfNotHosting": "这台电脑已登记到账号。现在没在共享，别的设备能看到它、但要等你关掉控制台才能连上",
   "accountDevices.retry": "重新登记",
   "accountDevices.thisDevice": "本机",
 

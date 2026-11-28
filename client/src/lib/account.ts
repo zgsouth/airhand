@@ -200,6 +200,8 @@ export interface HostIdentity {
   code: number | null;
   pairing: string | null;
   name: string;
+  /** 被控端此刻真的在跑。false = 身份是从配置里读的（macOS 开着控制台时），别的设备会看到离线 */
+  hosting: boolean;
 }
 
 /** 读本机被控端的控制码和配对码；网页版没有（返回 null） */
