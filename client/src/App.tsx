@@ -6,7 +6,8 @@ import { Popouts } from "./components/PopoutView";
 import { SessionView } from "./components/SessionView";
 import { TitleBar } from "./components/TitleBar";
 import { WebUnsupported, webUnsupported } from "./components/WebUnsupported";
-import { allowClose, applyFullscreen, closeTab, loadDevices, reopenLast } from "./lib/actions";
+import { LoginView } from "./components/LoginView";
+import { allowClose, applyFullscreen, closeTab, loadDevices, reopenLast, startAccountSync } from "./lib/actions";
 import { api } from "./lib/api";
 import { supportedDecoders } from "./lib/codec";
 import { setLang, useLang } from "./lib/i18n";
@@ -20,7 +21,10 @@ export function App() {
   useLang();
   // 网页版：不是安全页面（HTTPS / localhost）或浏览器太旧，没有视频解码可用
   const unsupported = webUnsupported();
-  return unsupported ? <WebUnsupported reason={unsupported} /> : <Console />;
+  // 没登录账号：整个窗口是登录页，登录之后才进控制台（见 components/LoginView.tsx）
+  const signedIn = useStore((s) => s.account.user !== null);
+  if (unsupported) return <WebUnsupported reason={unsupported} />;
+  return signedIn ? <Console /> : <LoginView />;
 }
 
 /**
@@ -60,6 +64,8 @@ function Console() {
     });
     void api.serverStatus().then(store.setServer);
     void loadDevices();
+    // 账号服务：拉同账号的设备列表，并把本机登记上去（每 45 秒一次，见 actions.ts）
+    startAccountSync();
     void supportedDecoders().then(store.setDecoders);
     const unStatus = api.onServerStatus(store.setServer);
     const unOnline = api.onHostOnline(store.hostOnline);

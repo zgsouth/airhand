@@ -5,11 +5,22 @@
 // 以前主菜单在最左边的 Logo 上：macOS 上和系统的红绿灯按钮挤在一起，点服务器状态也会在最左边弹出菜单。
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api } from "../lib/api";
-import { focusActive, requestToHost } from "../lib/actions";
+import { focusActive, requestToHost, signOut } from "../lib/actions";
 import { setLang, useLang, useT, type Lang } from "../lib/i18n";
 import { problemText } from "../lib/messages";
 import { serverStatus, useStore } from "../lib/store";
-import { IconCheck, IconChevron, IconCopy, IconKeyboard, IconServer, IconSettings, IconSwap, IconWarn } from "./Icons";
+import {
+  IconCheck,
+  IconChevron,
+  IconCopy,
+  IconKeyboard,
+  IconLogout,
+  IconServer,
+  IconSettings,
+  IconSwap,
+  IconUser,
+  IconWarn,
+} from "./Icons";
 import { Logo } from "./Logo";
 import { Popover } from "./Popover";
 
@@ -48,6 +59,7 @@ export function SettingsButton() {
 function AppMenu({ onClose }: { onClose: () => void }) {
   const t = useT();
   const app = useStore((s) => s.app);
+  const account = useStore((s) => s.account);
   const web = api.kind === "web";
   const [keys, setKeys] = useState(false);
 
@@ -72,6 +84,13 @@ function AppMenu({ onClose }: { onClose: () => void }) {
           <span className="am-label">{t("menu.language")}</span>
           <LangSwitch />
         </div>
+        {/* 账号服务（见 lib/account.ts）：登录的账号和它所在的服务器 */}
+        <div className="am-row" title={account.base}>
+          <span className="am-label">{t("menu.account")}</span>
+          <span className="am-value">
+            <IconUser size={13} /> {account.user ?? "—"}
+          </span>
+        </div>
         {/* 设置、本机的控制码、我的设备都在这个文件里 */}
         {app?.configPath && (
           <div className="am-row am-stack" title={t("menu.configHint")}>
@@ -82,6 +101,24 @@ function AppMenu({ onClose }: { onClose: () => void }) {
             <div className="am-path">{breakablePath(app.configPath)}</div>
           </div>
         )}
+      </div>
+
+      <div className="am-actions">
+        <button
+          className="am-item"
+          onClick={() => {
+            onClose();
+            signOut();
+          }}
+        >
+          <span className="am-item-icon">
+            <IconLogout size={16} />
+          </span>
+          <span className="am-item-text">
+            {t("menu.signOut")}
+            <span className="muted small block">{t("menu.signOutHint")}</span>
+          </span>
+        </button>
       </div>
 
       {/* 网页版没有被控端模式，浏览器也会拦下这些快捷键 */}

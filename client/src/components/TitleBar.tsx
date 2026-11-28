@@ -242,7 +242,7 @@ const middleClickCloses = (view: string) => ({
 
 // ───────────────────────── 窗口按钮 ─────────────────────────
 
-function WindowButtons() {
+export function WindowButtons() {
   const t = useT();
   const frame = api.frame!;
   const [maximized, setMaximized] = useState(false);

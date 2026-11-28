@@ -1,0 +1,83 @@
+# 账号与账号设备（account-api）
+
+[← 回 README](../README.md)
+
+Airhand 原本是**控制码驱动**的：被控端连上中转服务器后拿到 6 位控制码，控制端输码找设备；"我的设备"只是本机
+`config.toml` 里的一份本地记录，换台电脑就看不到。
+
+这个版本加了一条**账号线**：登录一个账号之后，同账号下在线的设备会直接列出来，点一下就连，配对码由服务器按需下发。
+它和原来的控制码方式并存——不影响的，控制码照样能手输。
+
+```
+被控端 A ──┐                        ┌── 控制端 B（登录后看到 A、C）
+被控端 C ──┴── account-api（自建）──┘
+                    │
+            中转服务器（UDP 4433，不参与账号）
+```
+
+账号服务只存**设备元数据 + 加密后的配对码**，不参与 Airhand 的 QUIC 传输和端到端加密：会话仍然只在两台设备之间
+加密，服务器连字节都看不到。
+
+## 服务器
+
+用 `account-api/`（Node + SQLite）自己部署，接口和部署方式见那里的 README。要点：
+
+| 接口 | 用途 |
+|---|---|
+| `POST /auth/login` | 固定账号密码 → 永不过期的 token |
+| `POST /device/register` | 被控端登记自己的控制码和配对码（upsert） |
+| `POST /device/heartbeat` | 心跳，90 秒没有就算离线 |
+| `GET /device/list` | 同账号的设备（不含配对码） |
+| `GET /device/credential` | 按需取某台的配对码 |
+
+## 客户端
+
+### 登录页
+
+没登录时整个窗口就是登录页（`client/src/components/LoginView.tsx`）：账号、密码、服务器地址。
+登录成功后 token 存在 WebView 的 localStorage 里，下次打开直接进控制台；**token 不会过期**，只有"退出登录"（设置菜单里）才删。
+
+服务器地址的来源，优先级从高到低：
+
+1. 登录页里手填的（存 localStorage）——内网换了 IP 不用重新打包
+2. 构建时注入的 `VITE_AIRHAND_ACCOUNT_API`（见 `.github/workflows/build-airhand.yml` 的 `AIRHAND_ACCOUNT_API` secret）
+3. 都没有：登录页会把地址栏摊开，逼你填一个
+
+地址格式必须是 `http(s)://host:port`，不带路径。
+
+### 账号设备
+
+新建连接页里，"我的设备"上面多了一块"账号设备"（`client/src/components/AccountDevices.tsx`）：
+同账号的设备、控制码、在线状态、最后在线时间。点一下就直接连——配对码在这时候才从服务器取
+（`GET /device/credential`），不存在本机。取不到（对方换过配对码、服务器上那份过期了）就退回原来的流程：
+Airhand 要求配对码时界面会让你输。
+
+离线的设备也能点：服务器会让连接等着，对方一上线就接上，和"我的设备"里的重连一样。
+
+### 本机登记
+
+控制台每 45 秒做两件事（`client/src/lib/actions.ts` 的 `startAccountSync`）：把本机登记到账号、拉一次设备列表。
+登记需要本机的**控制码和配对码**，这两个原本只有托盘知道，所以 Rust 端加了一个命令 `host_identity`
+（`src-tauri/src/lib.rs`）把它们交给控制台。
+
+**限制**：控制码和配对码只在被控端连着服务器时才有。macOS / Linux 上打开控制台时被控端会停下，
+所以这两台上"本机登记"要等切回被控端模式之后才会成功；Windows 上被控端一直跑着（系统服务或本进程），没有这个问题。
+界面上会显示"这台电脑还没登记到账号"，旁边有"重新登记"。
+
+## 明文 HTTP 的两个坑
+
+账号服务一般跑在内网，`http://` 就够了，但系统会拦：
+
+- **Android 9+**：`AndroidManifest.xml` 的 `<application>` 上要 `android:usesCleartextTraffic="true"`
+- **iOS**：`Info.plist` 要 ATS 例外（`NSAllowsLocalNetworking` 或 `NSAllowsArbitraryLoads`）
+- **CORS**：客户端是从 `tauri://localhost` 发请求的，`account-api` 里已经放开了 `Access-Control-Allow-Origin`
+  （只用 Bearer token、不用 cookie，所以放开 `*` 是安全的）
+
+症状都是"网络错误"，而且服务端日志里什么都没有——先怀疑这三条。
+
+## 安全
+
+- 密码只在登录那一次发给服务器，客户端不存
+- token 是 HMAC-SHA256 自签的，没有过期时间：换服务器上的 `TOKEN_SECRET` 会让所有客户端立刻失效（要重新登录）
+- 配对码在服务器上用 AES-256-GCM 加密存，列表接口永远不返回它；换 `DEVICE_SECRET` 会让已存的配对码全部解不开
+  （所有设备要重新配对），两个密钥都别乱换，并且和 `account-data/` 一起备份

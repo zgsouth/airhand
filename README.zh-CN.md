@@ -152,6 +152,7 @@ AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<指纹> docker compose 
 |---|---|
 | [使用指南](docs/usage.zh-CN.md) | 被控端、Windows 安装版、配置文件、卸载、控制台、画质、界面语言 |
 | [部署](docs/deploy.zh-CN.md) | 中转服务器的配置、网页控制台、反向代理 |
+| [账号](docs/account.zh-CN.md) | 登录、账号设备列表、本机登记、account-api 服务器 |
 | [Android](docs/android.zh-CN.md) | 用手机控制别人、共享本机、手势、电视 |
 | [iOS](docs/ios.zh-CN.md) | iPhone / iPad：控制别人、共享本机、构建 IPA |
 | [构建](docs/building.zh-CN.md) | 各平台的依赖和安装包、签名、APK |

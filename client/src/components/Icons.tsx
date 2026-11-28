@@ -185,6 +185,24 @@ export const IconHistory = (p: P) =>
   base(p, <path d="M3.5 12a8.5 8.5 0 1 0 2.5-6M3.5 4v4h4M12 7.5V12l3 2" />);
 export const IconArrowRight = (p: P) => base(p, <path d="M5 12h14M13 6l6 6-6 6" />);
 export const IconPencil = (p: P) => base(p, <path d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4" />);
+/** 账号（登录页、设置菜单） */
+export const IconUser = (p: P) =>
+  base(
+    p,
+    <>
+      <circle cx="12" cy="8" r="3.6" />
+      <path d="M4.6 20c0-3.7 3.4-5.7 7.4-5.7s7.4 2 7.4 5.7" />
+    </>,
+  );
+/** 退出登录 */
+export const IconLogout = (p: P) =>
+  base(
+    p,
+    <>
+      <path d="M14.5 4H18a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3.5" />
+      <path d="M10 16l-4-4 4-4M6 12h9.5" />
+    </>,
+  );
 /** 设置（标签栏右侧的主菜单） */
 export const IconSettings = (p: P) =>
   base(

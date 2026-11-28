@@ -152,6 +152,7 @@ Open `http://localhost:8080` on that machine, or `https://<its address>:8080` fr
 |---|---|
 | [Usage](docs/usage.md) | Host, Windows installation, configuration file, uninstalling, console, quality, language |
 | [Deployment](docs/deploy.md) | Relay server settings, web console, reverse proxies |
+| [Account](docs/account.md) | Signing in, account device list, self-registration, the account-api server |
 | [Android](docs/android.md) | Controlling from a phone, sharing the phone, gestures, TVs |
 | [iOS](docs/ios.md) | iPhone / iPad: controlling, sharing the screen, building the IPA |
 | [Building](docs/building.md) | Per-platform requirements and packages, signing, APK |

@@ -1,7 +1,10 @@
 // 跨组件的操作：连接、我的设备、重新打开关闭的会话、关闭控制台 / 切换为被控端（先确认）、全屏。
+import * as account from "./account";
 import { api, toProblem, type QualitySettings, type SavedDevice } from "./api";
+import { bestCodec } from "./codec";
 import * as devices from "./devices";
 import { OS } from "./platform";
+import { DEFAULT_PRESET, presetSettings } from "./presets";
 import { RemoteSession } from "./session";
 import { emptyDraft, store } from "./store";
 
@@ -238,3 +241,117 @@ export async function toggleFullscreen() {
   await applyFullscreen(next);
 }
 
+
+// ───────────────────────── 账号服务 ─────────────────────────
+
+/**
+ * 登录（见 lib/account.ts）。成功之后 App 会把界面从登录页换成控制台，
+ * 这里顺手把本机登记到账号、起心跳（见 startAccountSync）。
+ * `base` 是登录页里填的服务器地址（空 = 用构建时注入的那个）。
+ */
+export async function signIn(username: string, password: string, base: string): Promise<void> {
+  account.setBaseUrl(base);
+  store.setAccount({ base: account.baseUrl(), busy: true, error: null });
+  try {
+    await account.login(username, password);
+  } catch (e) {
+    const err = account.toAccountError(e);
+    store.setAccount({ busy: false, error: { kind: err.kind, detail: err.message } });
+    throw err;
+  }
+  store.signedIn(username);
+  startAccountSync();
+}
+
+/** 退出登录：断开会话、回到登录页（本机的"我的设备"不动） */
+export function signOut() {
+  stopAccountSync();
+  account.logout();
+  store.signedOut();
+}
+
+let syncTimer: number | null = null;
+
+/** 账号同步：每 45 秒把本机登记一次（服务器顺便刷新 last_seen）并拉一次设备列表 */
+const SYNC_MS = 45_000;
+
+/** 登录之后开始同步；退出登录时停掉 */
+export function startAccountSync() {
+  stopAccountSync();
+  if (!store.get().account.user) return;
+  void syncTick();
+  syncTimer = globalThis.setInterval(() => void syncTick(), SYNC_MS) as unknown as number;
+}
+
+export function stopAccountSync() {
+  if (syncTimer !== null) globalThis.clearInterval(syncTimer);
+  syncTimer = null;
+}
+
+async function syncTick() {
+  if (!store.get().account.user) return stopAccountSync();
+  await registerThisDevice();
+  await refreshAccountDevices();
+}
+
+/**
+ * 把本机登记到账号：别的设备就能在这台电脑上线时看到它。
+ * 控制码和配对码只在被控端连着服务器时才有——被控端没跑（例如 macOS 上正开着控制台）
+ * 就先跳过，下一轮再试。
+ */
+export async function registerThisDevice(): Promise<void> {
+  let id: account.HostIdentity | null = null;
+  try {
+    id = await account.hostIdentity();
+  } catch {
+    id = null;
+  }
+  if (!id || id.code === null || !id.pairing) {
+    store.setAccount({ self: "hostOffline" });
+    return;
+  }
+  try {
+    await account.registerSelf({
+      uuid: account.deviceUuid(),
+      name: id.name || "Airhand",
+      controlCode: String(id.code).padStart(6, "0"),
+      pairingCode: id.pairing,
+    });
+    store.setAccount({ self: true });
+  } catch (e) {
+    store.setAccount({ self: account.toAccountError(e).message });
+  }
+}
+
+/** 拉一次同账号的设备列表（token 失效就直接回登录页） */
+export async function refreshAccountDevices(): Promise<void> {
+  if (!store.get().account.user) return;
+  store.setAccount({ busy: true });
+  try {
+    const list = await account.listDevices();
+    store.setAccount({ devices: list, busy: false, loaded: true, error: null });
+  } catch (e) {
+    const err = account.toAccountError(e);
+    if (err.kind === "unauthorized") return signOut();
+    store.setAccount({ busy: false, loaded: true, error: { kind: err.kind, detail: err.message } });
+  }
+}
+
+/**
+ * 连账号设备：配对码按需从服务器取（平时不落在本机），取不到就让 AirHand 自己问用户要
+ * （对方换过配对码、或者服务器上的那份过期了）。
+ */
+export async function connectAccountDevice(d: account.AccountDevice): Promise<void> {
+  const st = store.get();
+  if (st.draft?.busy) return;
+  const saved = st.devices.find((x) => x.code === d.control_code);
+  const settings = saved?.quality ?? presetSettings(DEFAULT_PRESET, bestCodec(st.decoders));
+  let pairing: string | null = null;
+  try {
+    pairing = await account.credential(d.device_uuid);
+  } catch {
+    // 拿不到配对码（404 / 网络抖动）：照常连，对方要求配对时界面会让用户输
+    pairing = null;
+  }
+  await openSession(d.control_code, settings, { pairing });
+}

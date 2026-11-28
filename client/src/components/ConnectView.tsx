@@ -11,6 +11,7 @@ import { bestCodec } from "../lib/codec";
 import { CODEC_LABEL, PRESETS, matchPreset, presetDesc, presetName, presetSettings } from "../lib/presets";
 import type { RemoteSession } from "../lib/session";
 import { store, useSession, useStore, type Draft } from "../lib/store";
+import { AccountDevices } from "./AccountDevices";
 
 /** 这些问题要用户输入配对码（对方的身份变了也是：重新配对才认新的身份） */
 const PAIRING_PROBLEMS = new Set(["pairingRequired", "pairingFailed", "pairingUnavailable", "hostKeyChanged"]);
@@ -230,6 +231,7 @@ export function ConnectView() {
           </button>
         </section>
 
+        <AccountDevices disabled={busy || !online} />
         <MyDevices onOpen={openDevice} disabled={busy || !online} />
       </div>
     </div>

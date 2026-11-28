@@ -600,6 +600,32 @@ async fn devices_save(
         .map_err(|e| Problem::failed(format!("{e:#}")))
 }
 
+/// 本机被控端的身份（控制台"把这台电脑加入账号"用，见 client/src/lib/account.ts）。
+///
+/// 控制码和配对码本来只给托盘看（[`HostStatus`]），控制台要往账号服务登记本机就得知道它们。
+/// 被控端还没连上服务器时 `code` 是 `None`，配对码还不知道时 `pairing` 是 `None`。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostIdentity {
+    code: Option<u32>,
+    pairing: Option<String>,
+    /// 本机设备名（登记到账号服务时显示给别的设备看）
+    name: String,
+}
+
+#[tauri::command]
+async fn host_identity(state: tauri::State<'_, AppState>) -> Result<HostIdentity, Problem> {
+    let (code, pairing) = {
+        let st = state.hub.borrow();
+        (st.host.code, st.host.pairing.clone())
+    };
+    // sysinfo::host_identity 要读系统信息，别占着主线程
+    let name = tauri::async_runtime::spawn_blocking(|| sysinfo::host_identity().0)
+        .await
+        .unwrap_or_default();
+    Ok(HostIdentity { code, pairing, name })
+}
+
 /// 控制台切换界面语言
 #[tauri::command]
 fn set_language(app: AppHandle, lang: Lang) {
@@ -784,6 +810,7 @@ pub fn run() {
             switch_to_host,
             devices_load,
             devices_save,
+            host_identity,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

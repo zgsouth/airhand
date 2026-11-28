@@ -2,6 +2,7 @@
 // "我的设备"保存在 config.toml 里（见 actions.ts 的 saveDevices）；画面增强、本地光标是这台电脑自己显示的偏好，
 // 和对方无关，存在 WebView / 浏览器的 localStorage 里；其余只在控制台打开期间有效。
 import { useCallback, useSyncExternalStore } from "react";
+import { baseUrl, currentUser, loggedIn, type AccountDevice, type AccountErrorKind } from "./account";
 import type { AppInfo, Codec, Problem, QualitySettings, SavedDevice, ServerState } from "./api";
 import { fmtCode } from "./devices";
 import { ENHANCE_LEVELS, type EnhanceLevel } from "./enhance";
@@ -32,6 +33,40 @@ export interface Recent {
 /** 等用户确认的操作：关闭控制台 / 切换为被控端都会断开所有会话 */
 export type Confirm = null | { kind: "close" | "toHost"; sessions: number };
 
+/**
+ * 账号服务（见 lib/account.ts）的状态。没登录时 `user` 是 null，界面显示登录页而不是控制台。
+ * 设备列表是服务器上的（同账号的每台设备都能看到），和本机的"我的设备"（config.toml）不是一回事。
+ */
+export interface AccountState {
+  /** 登录的用户名（null = 没登录） */
+  user: string | null;
+  /** 账号服务器地址；可能是空的（构建时没注入，用户得在登录页里填） */
+  base: string;
+  /** 同账号的设备，在线的不一定在前面（按名字排，见服务器） */
+  devices: AccountDevice[];
+  /** 正在登录 / 正在拉列表 */
+  busy: boolean;
+  /** 拉过一次设备列表了（不管成没成）：用来区分"空的"和"还没拉" */
+  loaded: boolean;
+  /** 最近一次账号操作失败的原因；成功后清掉 */
+  error: { kind: AccountErrorKind; detail: string } | null;
+  /** 本机登记到账号的结果：null = 还没试过，true 成功，字符串是取消的原因（例如被控端还没上线） */
+  self: boolean | string | null;
+}
+
+/** 启动时按 localStorage 里的 token 判断登录状态（登录过就不用再登） */
+function initialAccount(): AccountState {
+  return {
+    user: loggedIn() ? currentUser() : null,
+    base: baseUrl(),
+    devices: [],
+    busy: false,
+    loaded: false,
+    error: null,
+    self: null,
+  };
+}
+
 interface State {
   /** 顺序就是标签的顺序 */
   sessions: RemoteSession[];
@@ -60,6 +95,8 @@ interface State {
    * 关掉时只看画面里的。所有会话通用，默认打开（见 session.ts 的 applyCursor）
    */
   localCursor: boolean;
+  /** 账号服务（见 lib/account.ts）：登录状态和同账号的设备 */
+  account: AccountState;
 }
 
 const MAX_RECENT = 8;
@@ -117,6 +154,7 @@ let state: State = {
   immersive: false,
   enhance: loadEnhance(),
   localCursor: loadLocalCursor(),
+  account: initialAccount(),
 };
 
 const listeners = new Set<() => void>();
@@ -254,6 +292,26 @@ export const store = {
     if (v) store.setView(v);
   },
   setDevices: (devices: SavedDevice[], saved = state.devicesSaved) => set({ devices, devicesSaved: saved }),
+
+  // ── 账号服务 ──
+
+  /** 改账号状态（登录 / 退出 / 拉到设备列表 / 出错都走这里） */
+  setAccount: (patch: Partial<AccountState>) => set({ account: { ...state.account, ...patch } }),
+  /** 登录成功：进控制台（App 按 user 是否为空切换界面） */
+  signedIn: (user: string) =>
+    set({ account: { ...state.account, user, base: baseUrl(), busy: false, error: null, loaded: false, self: null } }),
+  /** 退出登录：回到登录页，清掉服务器上的那份列表（本机的"我的设备"不动） */
+  signedOut: () => {
+    // 会话是跟着这个账号连的：先全部断掉，别留着后台的重连定时器
+    for (const s of state.sessions) s.dispose();
+    set({
+      sessions: [],
+      draft: null,
+      view: "new",
+      immersive: false,
+      account: { ...initialAccount(), user: null, base: baseUrl() },
+    });
+  },
 
   setConfirm: (confirm: Confirm) => set({ confirm }),
 };
